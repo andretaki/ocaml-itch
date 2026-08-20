@@ -21,6 +21,18 @@ let stats_command =
        with_mapped_file path ~f:(fun buf ->
          let counts = Array.create ~len:256 0 in
          let total = ref 0 in
+         (* Field level aggregates, so that cross-checking against an
+            independent implementation compares decoded values and not just
+            message counts. *)
+         let added_shares = ref 0 in
+         let executed_shares = ref 0 in
+         let cancelled_shares = ref 0 in
+         let max_order_ref = ref 0 in
+         let add_notional = ref 0 in
+         let note_order_ref order_ref =
+           let order_ref = Types.Order_ref.to_int order_ref in
+           if order_ref > !max_order_ref then max_order_ref := order_ref
+         in
          let first_timestamp = ref None in
          let last_timestamp = ref None in
          let start = Core_unix.gettimeofday () in
@@ -29,14 +41,31 @@ let stats_command =
              incr total;
              let index = Char.to_int (Message.message_type message) in
              counts.(index) <- counts.(index) + 1;
-             let timestamp =
-               match message with
-               | System_event m -> Some m.timestamp
-               | Stock_directory m -> Some m.timestamp
-               | Add_order m -> Some m.timestamp
-               | Unparsed _ -> None
-             in
-             match timestamp with
+             (match message with
+              | Add_order m ->
+                added_shares := !added_shares + Types.Shares.to_int m.shares;
+                add_notional
+                := !add_notional
+                   + (Types.Shares.to_int m.shares * Types.Price.to_raw_4 m.price);
+                note_order_ref m.order_ref
+              | Order_executed m ->
+                executed_shares
+                := !executed_shares + Types.Shares.to_int m.executed_shares;
+                note_order_ref m.order_ref
+              | Order_executed_with_price m ->
+                executed_shares
+                := !executed_shares + Types.Shares.to_int m.executed_shares;
+                note_order_ref m.order_ref
+              | Order_cancel m ->
+                cancelled_shares
+                := !cancelled_shares + Types.Shares.to_int m.cancelled_shares;
+                note_order_ref m.order_ref
+              | Order_delete m -> note_order_ref m.order_ref
+              | Order_replace m ->
+                note_order_ref m.original_order_ref;
+                note_order_ref m.new_order_ref
+              | System_event _ | Stock_directory _ | Unparsed _ -> ());
+             match Message.timestamp message with
              | None -> ()
              | Some timestamp ->
                if Option.is_none !first_timestamp then first_timestamp := Some timestamp;
@@ -60,6 +89,11 @@ let stats_command =
            printf "first timestamp %s\n" (Types.Timestamp.to_string_hum t));
          Option.iter !last_timestamp ~f:(fun t ->
            printf "last timestamp  %s\n" (Types.Timestamp.to_string_hum t));
+         printf "added shares    %d\n" !added_shares;
+         printf "executed shares %d\n" !executed_shares;
+         printf "cancelled share %d\n" !cancelled_shares;
+         printf "add notional    %d (raw price(4) * shares)\n" !add_notional;
+         printf "max order ref   %d\n" !max_order_ref;
          printf "\n%-6s %12s  %s\n" "type" "count" "decoded";
          Array.iteri counts ~f:(fun index count ->
            if count > 0
@@ -67,7 +101,7 @@ let stats_command =
              let c = Char.of_int_exn index in
              let decoded =
                match c with
-               | 'S' | 'R' | 'A' | 'F' -> "yes"
+               | 'S' | 'R' | 'A' | 'F' | 'E' | 'C' | 'X' | 'D' | 'U' -> "yes"
                | _ -> "no"
              in
              printf "%-6s %12d  %s\n" (Char.to_string c) count decoded))))

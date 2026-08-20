@@ -8,8 +8,8 @@ can tell there was no OCaml one, so this is that.
 
 ## Status
 
-Early. The framing, the domain types and three message families are done and verified
-against real exchange data; the remaining message types are surfaced as `Unparsed` rather
+Early. The framing, the domain types and the nine message types that drive an order
+book are done and verified against real exchange data; the remaining message types are surfaced as `Unparsed` rather
 than skipped silently, so a fold over a full trading day completes and reports honestly
 what it did not decode.
 
@@ -19,10 +19,13 @@ what it did not decode.
 | Stock Directory | `R` | decoded |
 | Add Order | `A` | decoded |
 | Add Order with MPID | `F` | decoded |
-| Order Executed | `E` | surfaced as `Unparsed` |
-| Order Executed with Price | `C` | surfaced as `Unparsed` |
-| Order Cancel / Delete / Replace | `X` `D` `U` | surfaced as `Unparsed` |
+| Order Executed | `E` | decoded |
+| Order Executed with Price | `C` | decoded |
+| Order Cancel | `X` | decoded |
+| Order Delete | `D` | decoded |
+| Order Replace | `U` | decoded |
 | Trade / Cross Trade / Broken Trade | `P` `Q` `B` | surfaced as `Unparsed` |
+| Trading Action / Reg SHO / Market Participant | `H` `Y` `L` | surfaced as `Unparsed` |
 | everything else | | surfaced as `Unparsed` |
 
 ## Design notes
@@ -56,9 +59,13 @@ The parser is checked against ground truth, not against itself:
 - **Framing verified empirically.** The 2-byte big-endian length prefix is a property of
   the downloadable file distribution, not of the ITCH payload spec (which is carried over
   MoldUDP64 / SoupBinTCP). It is confirmed against real data rather than quoted.
-- **Independent cross-check.** The 48-bit timestamp assembly is verified against an
-  independent decoder — the arithmetic most likely to be subtly wrong and silently
-  corrupt everything downstream.
+- **Independent cross-check, at field level.** `test/cross_check.py` is a naive
+  reimplementation written from the spec, not from the OCaml. On 254,895 real messages it
+  agrees exactly on message counts, byte offsets, timestamps, share totals and notional.
+  That last one is a sum of products of two independently decoded fields across every Add
+  Order in the file, so any single-byte offset error changes it.
+- **48-bit timestamp assembly** is verified separately — it is the arithmetic most likely
+  to be subtly wrong and silently corrupt everything downstream.
 - **Spec-derived vectors.** Synthetic messages built by hand from the offset tables in
   the specification's section 1.3.
 

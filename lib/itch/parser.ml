@@ -93,12 +93,88 @@ let parse_add_order buf ~pos ~len ~with_mpid : Message.Add_order.t =
   }
 ;;
 
+let get_order_ref buf ~pos =
+  Order_ref.of_uint64_exn (Bigstring.get_uint64_be_exn buf ~pos)
+;;
+
+let get_printable buf ~pos =
+  match Bigstring.get buf pos with
+  | 'Y' -> true
+  | 'N' -> false
+  | c -> raise_s [%message "unknown ITCH printable flag" (c : char)]
+;;
+
+let parse_order_executed buf ~pos ~len : Message.Order_executed.t =
+  check_length ~message_type:'E' ~expected:Message.Order_executed.length ~actual:len;
+  { stock_locate = Locate.of_int (Bigstring.get_uint16_be buf ~pos:(pos + 1))
+  ; tracking_number = Bigstring.get_uint16_be buf ~pos:(pos + 3)
+  ; timestamp = get_timestamp buf ~pos:(pos + 5)
+  ; order_ref = get_order_ref buf ~pos:(pos + 11)
+  ; executed_shares = Shares.of_int (Bigstring.get_uint32_be buf ~pos:(pos + 19))
+  ; match_number =
+      Match_number.of_uint64_exn (Bigstring.get_uint64_be_exn buf ~pos:(pos + 23))
+  }
+;;
+
+let parse_order_executed_with_price buf ~pos ~len : Message.Order_executed_with_price.t =
+  check_length
+    ~message_type:'C'
+    ~expected:Message.Order_executed_with_price.length
+    ~actual:len;
+  { stock_locate = Locate.of_int (Bigstring.get_uint16_be buf ~pos:(pos + 1))
+  ; tracking_number = Bigstring.get_uint16_be buf ~pos:(pos + 3)
+  ; timestamp = get_timestamp buf ~pos:(pos + 5)
+  ; order_ref = get_order_ref buf ~pos:(pos + 11)
+  ; executed_shares = Shares.of_int (Bigstring.get_uint32_be buf ~pos:(pos + 19))
+  ; match_number =
+      Match_number.of_uint64_exn (Bigstring.get_uint64_be_exn buf ~pos:(pos + 23))
+  ; printable = get_printable buf ~pos:(pos + 31)
+  ; execution_price = Price.of_raw_4 (Bigstring.get_uint32_be buf ~pos:(pos + 32))
+  }
+;;
+
+let parse_order_cancel buf ~pos ~len : Message.Order_cancel.t =
+  check_length ~message_type:'X' ~expected:Message.Order_cancel.length ~actual:len;
+  { stock_locate = Locate.of_int (Bigstring.get_uint16_be buf ~pos:(pos + 1))
+  ; tracking_number = Bigstring.get_uint16_be buf ~pos:(pos + 3)
+  ; timestamp = get_timestamp buf ~pos:(pos + 5)
+  ; order_ref = get_order_ref buf ~pos:(pos + 11)
+  ; cancelled_shares = Shares.of_int (Bigstring.get_uint32_be buf ~pos:(pos + 19))
+  }
+;;
+
+let parse_order_delete buf ~pos ~len : Message.Order_delete.t =
+  check_length ~message_type:'D' ~expected:Message.Order_delete.length ~actual:len;
+  { stock_locate = Locate.of_int (Bigstring.get_uint16_be buf ~pos:(pos + 1))
+  ; tracking_number = Bigstring.get_uint16_be buf ~pos:(pos + 3)
+  ; timestamp = get_timestamp buf ~pos:(pos + 5)
+  ; order_ref = get_order_ref buf ~pos:(pos + 11)
+  }
+;;
+
+let parse_order_replace buf ~pos ~len : Message.Order_replace.t =
+  check_length ~message_type:'U' ~expected:Message.Order_replace.length ~actual:len;
+  { stock_locate = Locate.of_int (Bigstring.get_uint16_be buf ~pos:(pos + 1))
+  ; tracking_number = Bigstring.get_uint16_be buf ~pos:(pos + 3)
+  ; timestamp = get_timestamp buf ~pos:(pos + 5)
+  ; original_order_ref = get_order_ref buf ~pos:(pos + 11)
+  ; new_order_ref = get_order_ref buf ~pos:(pos + 19)
+  ; shares = Shares.of_int (Bigstring.get_uint32_be buf ~pos:(pos + 27))
+  ; price = Price.of_raw_4 (Bigstring.get_uint32_be buf ~pos:(pos + 31))
+  }
+;;
+
 let parse_exn buf ~pos ~len : Message.t =
   match Bigstring.get buf pos with
   | 'S' -> System_event (parse_system_event buf ~pos ~len)
   | 'R' -> Stock_directory (parse_stock_directory buf ~pos ~len)
   | 'A' -> Add_order (parse_add_order buf ~pos ~len ~with_mpid:false)
   | 'F' -> Add_order (parse_add_order buf ~pos ~len ~with_mpid:true)
+  | 'E' -> Order_executed (parse_order_executed buf ~pos ~len)
+  | 'C' -> Order_executed_with_price (parse_order_executed_with_price buf ~pos ~len)
+  | 'X' -> Order_cancel (parse_order_cancel buf ~pos ~len)
+  | 'D' -> Order_delete (parse_order_delete buf ~pos ~len)
+  | 'U' -> Order_replace (parse_order_replace buf ~pos ~len)
   | message_type -> Unparsed { message_type; length = len }
 ;;
 

@@ -233,6 +233,97 @@ module Add_order = struct
   let length_with_mpid = 40
 end
 
+(* Spec 1.4: "Modify Order messages always include the Order Reference Number of
+   the Add Order to which the update applies. [...] Nasdaq may send multiple
+   Modify Order messages for the same order reference number and the effects are
+   cumulative. When the number of display shares for an order reaches zero, the
+   order is dead and should be removed from the book." *)
+
+module Order_executed = struct
+  type t =
+    { stock_locate : Locate.t
+    ; tracking_number : int
+    ; timestamp : Timestamp.t
+    ; order_ref : Order_ref.t
+    ; executed_shares : Shares.t
+    ; match_number : Match_number.t
+    }
+  [@@deriving compare, equal, sexp_of]
+
+  let length = 31
+end
+
+(* Kept distinct from [Order_executed] rather than folded together the way "A"
+   and "F" are: the trailing fields here are not decoration but semantics. The
+   execution happened away from the order's display price, and a non-printable
+   execution must be excluded from time-and-sales and volume or it is counted
+   twice when the later bulk print arrives. *)
+module Order_executed_with_price = struct
+  type t =
+    { stock_locate : Locate.t
+    ; tracking_number : int
+    ; timestamp : Timestamp.t
+    ; order_ref : Order_ref.t
+    ; executed_shares : Shares.t
+    ; match_number : Match_number.t
+    ; printable : bool
+    ; execution_price : Price.t
+    }
+  [@@deriving compare, equal, sexp_of]
+
+  let length = 36
+end
+
+(** A partial cancel: [cancelled_shares] comes {i off} the order's display size,
+    it is not the new size. *)
+module Order_cancel = struct
+  type t =
+    { stock_locate : Locate.t
+    ; tracking_number : int
+    ; timestamp : Timestamp.t
+    ; order_ref : Order_ref.t
+    ; cancelled_shares : Shares.t
+    }
+  [@@deriving compare, equal, sexp_of]
+
+  let length = 23
+end
+
+module Order_delete = struct
+  type t =
+    { stock_locate : Locate.t
+    ; tracking_number : int
+    ; timestamp : Timestamp.t
+    ; order_ref : Order_ref.t
+    }
+  [@@deriving compare, equal, sexp_of]
+
+  let length = 19
+end
+
+(** Spec 1.4.5: "Since the side, stock symbol and attribution (if any) cannot be
+    changed by an Order Replace event, these fields are not included in the
+    message. Firms should retain the side, stock symbol and MPID from the
+    original Add Order message."
+
+    So this message alone is not enough to place the replacement order: the book
+    has to carry side and symbol forward from [original_order_ref]. Unlike a
+    cancel, [shares] here {i is} the new total, not a delta. *)
+module Order_replace = struct
+  type t =
+    { stock_locate : Locate.t
+    ; tracking_number : int
+    ; timestamp : Timestamp.t
+    ; original_order_ref : Order_ref.t
+    ; new_order_ref : Order_ref.t
+    ; shares : Shares.t
+    ; price : Price.t
+    }
+  [@@deriving compare, equal, sexp_of]
+
+  let length = 35
+end
+
 (** A message whose type is recognised by the framing but not yet decoded.
 
     ITCH 5.0 has around twenty message types; this parser currently decodes
@@ -250,6 +341,11 @@ type t =
   | System_event of System_event.t
   | Stock_directory of Stock_directory.t
   | Add_order of Add_order.t
+  | Order_executed of Order_executed.t
+  | Order_executed_with_price of Order_executed_with_price.t
+  | Order_cancel of Order_cancel.t
+  | Order_delete of Order_delete.t
+  | Order_replace of Order_replace.t
   | Unparsed of Unparsed.t
 [@@deriving compare, equal, sexp_of, variants]
 
@@ -258,5 +354,23 @@ let message_type = function
   | Stock_directory _ -> 'R'
   | Add_order { attribution = None; _ } -> 'A'
   | Add_order { attribution = Some _; _ } -> 'F'
+  | Order_executed _ -> 'E'
+  | Order_executed_with_price _ -> 'C'
+  | Order_cancel _ -> 'X'
+  | Order_delete _ -> 'D'
+  | Order_replace _ -> 'U'
   | Unparsed { message_type; _ } -> message_type
+;;
+
+(** The timestamp every message carries in its header. *)
+let timestamp = function
+  | System_event m -> Some m.timestamp
+  | Stock_directory m -> Some m.timestamp
+  | Add_order m -> Some m.timestamp
+  | Order_executed m -> Some m.timestamp
+  | Order_executed_with_price m -> Some m.timestamp
+  | Order_cancel m -> Some m.timestamp
+  | Order_delete m -> Some m.timestamp
+  | Order_replace m -> Some m.timestamp
+  | Unparsed _ -> None
 ;;

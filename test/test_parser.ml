@@ -83,13 +83,14 @@ let%expect_test "add order, without and with MPID attribution" =
 
 (* A message type the parser does not decode yet must be surfaced, not skipped
    silently and not fatal: this is what lets a fold over a full trading day
-   complete while reporting honestly what it did not understand. *)
+   complete while reporting honestly what it did not understand. 0x4c is "L",
+   Market Participant Position, which is not decoded yet. *)
 let%expect_test "unknown message type is surfaced, framing still advances" =
   dump
-    {| 0005 5800 0100 00 0024 4100 0100 001f 1ace d9f0 0000 0000 0000 0000 2a42 0000 0064 4141 504c 2020 2020 0012 d644 |};
+    {| 0005 4c00 0100 00 0024 4100 0100 001f 1ace d9f0 0000 0000 0000 0000 2a42 0000 0064 4141 504c 2020 2020 0012 d644 |};
   [%expect
     {|
-    (Unparsed ((message_type X) (length 5)))
+    (Unparsed ((message_type L) (length 5)))
     (Add_order
      ((stock_locate 1) (tracking_number 0) (timestamp 34200000000000)
       (order_ref 42) (side Buy) (shares 100) (stock AAPL) (price 1234500)
@@ -108,5 +109,70 @@ let%expect_test "partial trailing message is not consumed" =
      ((stock_locate 0) (tracking_number 0) (timestamp 10953404452051)
       (event_code Start_of_messages)))
     consumed 14 of 19 bytes
+    |}]
+;;
+
+(* Every decoded message type has a fixed length in the spec, and the file's own
+   framing states a length independently. When those two disagree the bytes are
+   not what they claim to be, so the parser refuses rather than decoding
+   whatever happens to be at the offsets. *)
+let%expect_test "a framed length that disagrees with the spec is rejected" =
+  let body = bigstring_of_hex {| 5800 0100 00 |} in
+  print_s
+    [%sexp (Parser.parse body ~pos:0 ~len:(Bigstring.length body) : Message.t Or_error.t)];
+  [%expect
+    {|
+    (Error
+     ("ITCH message length disagrees with the spec" (message_type X)
+      (spec_length 23) (framed_length 5)))
+    |}]
+;;
+
+(* The five modify-order messages, built by hand from the spec's section 1.4
+   offset tables against order reference 42. *)
+let%expect_test "modify order messages" =
+  dump
+    {|
+      001f 4500 0100 001f 1ace d9f0 0000 0000
+      0000 0000 2a00 0000 3200 0000 0000 0007
+      b1
+    |};
+  dump
+    {|
+      0024 4300 0100 001f 1ace d9f0 0000 0000
+      0000 0000 2a00 0000 3200 0000 0000 0007
+      b159 0012 d5d0
+    |};
+  dump {| 0017 5800 0100 001f 1ace d9f0 0000 0000 0000 0000 2a00 0000 19 |};
+  dump {| 0013 4400 0100 001f 1ace d9f0 0000 0000 0000 0000 2a |};
+  dump
+    {|
+      0023 5500 0100 001f 1ace d9f0 0000 0000
+      0000 0000 2a00 0000 0000 0000 2b00 0000
+      c800 12d6 44
+    |};
+  [%expect
+    {|
+    (Order_executed
+     ((stock_locate 1) (tracking_number 0) (timestamp 34200000000000)
+      (order_ref 42) (executed_shares 50) (match_number 1969)))
+    consumed 33 of 33 bytes
+    (Order_executed_with_price
+     ((stock_locate 1) (tracking_number 0) (timestamp 34200000000000)
+      (order_ref 42) (executed_shares 50) (match_number 1969) (printable true)
+      (execution_price 1234384)))
+    consumed 38 of 38 bytes
+    (Order_cancel
+     ((stock_locate 1) (tracking_number 0) (timestamp 34200000000000)
+      (order_ref 42) (cancelled_shares 25)))
+    consumed 25 of 25 bytes
+    (Order_delete
+     ((stock_locate 1) (tracking_number 0) (timestamp 34200000000000)
+      (order_ref 42)))
+    consumed 21 of 21 bytes
+    (Order_replace
+     ((stock_locate 1) (tracking_number 0) (timestamp 34200000000000)
+      (original_order_ref 42) (new_order_ref 43) (shares 200) (price 1234500)))
+    consumed 37 of 37 bytes
     |}]
 ;;
