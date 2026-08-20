@@ -1,0 +1,12 @@
+(executable
+ (name itch)
+ (public_name itch)
+ (libraries
+  core
+  core_unix
+  core_unix.command_unix
+  core_unix.bigstring_unix
+  core_unix.filename_unix
+  itch)
+ (preprocess
+  (pps ppx_jane)))
