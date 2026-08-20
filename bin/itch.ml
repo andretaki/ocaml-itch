@@ -1,6 +1,21 @@
 open! Core
 open Itch
 
+(** Wall clock time is not monotonic. Under WSL 2 it can step backwards, and a
+    backwards step is not a small error in a "fastest of N" loop -- it produces a
+    negative elapsed time, which then wins every comparison and is reported as
+    the result. That is not hypothetical: a benchmark round on this machine
+    printed [fastest of 7 -1.8768 s (-16.92 M msg/s)] before this was fixed.
+
+    [Clock.gettime Monotonic] cannot go backwards. It is an [Or_error] because
+    not every platform provides it, so fall back to the wall clock where it is
+    missing rather than refusing to run. *)
+let now_seconds =
+  match Core_unix.Clock.gettime with
+  | Ok gettime -> fun () -> Int63.to_float (gettime Core_unix.Clock.Monotonic) /. 1e9
+  | Error _ -> Core_unix.gettimeofday
+;;
+
 (** mmap rather than read: the parser decodes in place out of the mapped pages,
     so nothing copies the file into the heap on the way in. *)
 let with_mapped_file path ~f =
@@ -35,7 +50,7 @@ let stats_command =
          in
          let first_timestamp = ref None in
          let last_timestamp = ref None in
-         let start = Core_unix.gettimeofday () in
+         let start = now_seconds () in
          let consumed =
            Reader.iter buf ~pos:0 ~len:(Bigstring.length buf) ~f:(fun message ->
              incr total;
@@ -71,7 +86,7 @@ let stats_command =
                if Option.is_none !first_timestamp then first_timestamp := Some timestamp;
                last_timestamp := Some timestamp)
          in
-         let elapsed = Core_unix.gettimeofday () -. start in
+         let elapsed = now_seconds () -. start in
          let size = Bigstring.length buf in
          printf "file            %s\n" path;
          printf "size            %d bytes\n" size;
@@ -146,7 +161,7 @@ let book_command =
          (* Locate codes are assigned per day by the Stock Directory spin, so the
             symbol to locate mapping has to be learned from the file itself. *)
          let locate_of_symbol = String.Table.create () in
-         let start = Core_unix.gettimeofday () in
+         let start = now_seconds () in
          let consumed =
            Reader.iter buf ~pos:0 ~len:(Bigstring.length buf) ~f:(fun message ->
              (match message with
@@ -158,7 +173,7 @@ let book_command =
               | _ -> ());
              Order_book.apply books message)
          in
-         let elapsed = Core_unix.gettimeofday () -. start in
+         let elapsed = now_seconds () -. start in
          printf "replayed        %d bytes in %.3f s\n" consumed elapsed;
          printf "book messages   %d applied\n" (Order_book.applied books);
          printf
@@ -226,30 +241,49 @@ let checksum_command =
             than a measurement of how fast this disk is. *)
          ignore (Checksum_reader.consume (Checksum.create ()) buf ~pos:0 ~len : int);
          let best = ref Float.infinity in
+         let worst = ref 0. in
+         (* A sample that is not strictly positive means the clock misbehaved,
+            not that the parse was instant. Discarding it and saying so is the
+            only honest option: silently keeping it would make it the reported
+            result, since it beats every real sample. *)
+         let discarded = ref 0 in
          for _ = 1 to repeats do
            let state = Checksum.create () in
-           let start = Core_unix.gettimeofday () in
+           let start = now_seconds () in
            ignore (Checksum_reader.consume state buf ~pos:0 ~len : int);
-           let elapsed = Core_unix.gettimeofday () -. start in
-           if Float.( < ) elapsed !best then best := elapsed
+           let elapsed = now_seconds () -. start in
+           if Float.( <= ) elapsed 0.
+           then incr discarded
+           else (
+             if Float.( < ) elapsed !best then best := elapsed;
+             if Float.( > ) elapsed !worst then worst := elapsed)
          done;
          let consumed = Checksum_reader.consume state buf ~pos:0 ~len in
          printf "%s\n" (Checksum.to_string state);
          printf "consumed        %d bytes\n" consumed;
-         printf
-           "fastest of %d    %.4f s  (%.2f M msg/s, %.1f MB/s)\n"
-           repeats
-           !best
-           (Float.of_int state.messages /. !best /. 1e6)
-           (Float.of_int consumed /. !best /. 1e6);
+         if !discarded > 0
+         then printf "discarded       %d non-positive timing samples\n" !discarded;
+         if Float.is_inf !best
+         then printf "no usable timing samples\n"
+         else (
+           printf
+             "fastest of %d    %.4f s  (%.2f M msg/s, %.1f MB/s)\n"
+             (repeats - !discarded)
+             !best
+             (Float.of_int state.messages /. !best /. 1e6)
+             (Float.of_int consumed /. !best /. 1e6);
+           printf
+             "spread          %.4f s slowest, %+.1f%% over fastest\n"
+             !worst
+             ((!worst -. !best) /. !best *. 100.));
          if compare_paths
          then (
            let slow = Checksum.create () in
-           let start = Core_unix.gettimeofday () in
+           let start = now_seconds () in
            let slow_consumed =
              Reader.iter buf ~pos:0 ~len ~f:(Checksum.of_message slow)
            in
-           let elapsed = Core_unix.gettimeofday () -. start in
+           let elapsed = now_seconds () -. start in
            printf
              "\nMessage.t path  %.4f s  (%.2f M msg/s)\n"
              elapsed
