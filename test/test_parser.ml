@@ -176,3 +176,34 @@ let%expect_test "modify order messages" =
     consumed 37 of 37 bytes
     |}]
 ;;
+
+(* [Parser.parse] is public and takes an arbitrary range, while the field
+   accessors underneath it read without bounds checks. So it establishes the
+   range is inside the buffer before reading anything -- otherwise a malformed
+   offset is a segfault rather than an error. *)
+let%expect_test "a range outside the buffer is rejected, not read" =
+  let buf = bigstring_of_hex {| 5300 0000 0009 f649 c80c d34f |} in
+  let show ~pos ~len =
+    print_s [%sexp (Parser.parse buf ~pos ~len : Message.t Or_error.t)]
+  in
+  show ~pos:0 ~len:12;
+  show ~pos:8 ~len:12;
+  show ~pos:(-1) ~len:12;
+  show ~pos:0 ~len:0;
+  [%expect
+    {|
+    (Ok
+     (System_event
+      ((stock_locate 0) (tracking_number 0) (timestamp 10953404452051)
+       (event_code Start_of_messages))))
+    (Error
+     ("ITCH message range is outside the buffer" (pos 8) (len 12)
+      (buffer_length 12)))
+    (Error
+     ("ITCH message range is outside the buffer" (pos -1) (len 12)
+      (buffer_length 12)))
+    (Error
+     ("ITCH message range is outside the buffer" (pos 0) (len 0)
+      (buffer_length 12)))
+    |}]
+;;

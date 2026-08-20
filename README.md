@@ -101,16 +101,27 @@ lines must be byte-identical or the comparison is void. See [bench/README.md](be
 for the method and the caveats — including that the OCaml switch here has no flambda.
 
 **Getting to zero allocation was not where I expected.** It was not the records or the
-symbol strings. Core's `Bigstring.get_uint32_be` converts through a boxed `Int32.t`:
+symbol strings. It was `Bigstring.get_uint32_be`, which converts through a boxed `Int32.t`:
 
 ```ocaml
-let get_uint32_be t ~pos = uint32_of_int32_t (get_int32_t_be t ~pos)
+let[@inline] unsafe_get_uint32_be t ~pos = uint32_of_int32_t (unsafe_get_int32_t_be t ~pos)
+let          get_uint32_be        t ~pos = uint32_of_int32_t (get_int32_t_be        t ~pos)
 ```
 
-That is three words on every call, and ITCH reads a 32-bit field — a share count, a price,
-the low half of a timestamp — in nearly every message. `get_int32_be` reads straight to an
-unboxed `int`, and masking recovers the unsigned value exactly, including above 2^31. That
-one substitution took the handler path from 6 words per message to 0.
+The difference between those two lines is the `[@inline]`. Without it the boxed
+intermediate survives the call, and ITCH reads a 32-bit field — a share count, a price, the
+low half of a timestamp — in nearly every message:
+
+| | non-flambda | flambda `-O3` |
+|---|---|---|
+| `get_uint32_be` | **3 words/call** | 0 |
+| `unsafe_get_uint32_be` | 0 | 0 |
+| `get_int32_be land 0xFFFF_FFFF` | 0 | 0 |
+
+So this only bites on `ocaml-base-compiler`, where flambda cannot inline the box away — 
+which is nonetheless the compiler most people install by default. `get_int32_be` reads
+straight to an unboxed `int` and masking recovers the unsigned value exactly, including
+above 2^31. That one substitution took the handler path from 6 words per message to 0.
 
 The other one was a local `check` function inside the dispatch loop that captured the
 message length. A closure is a heap allocation, so that was one per message.

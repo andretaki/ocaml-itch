@@ -149,7 +149,24 @@ let parse_order_replace buf ~pos ~len : Message.Order_replace.t =
   }
 ;;
 
+(* {!Wire} reads without bounds checks, which is sound inside [Reader] because
+   the framing has already established the bytes are there. This entry point is
+   public and takes an arbitrary [pos] and [len], so it establishes the same
+   thing itself before reading anything. One comparison per message; the
+   alternative is a segfault on a malformed offset. *)
+let check_in_bounds buf ~pos ~len =
+  if pos < 0 || len < 1 || pos + len > Bigstring.length buf
+  then
+    raise_s
+      [%message
+        "ITCH message range is outside the buffer"
+          (pos : int)
+          (len : int)
+          ~buffer_length:(Bigstring.length buf : int)]
+;;
+
 let parse_exn buf ~pos ~len : Message.t =
+  check_in_bounds buf ~pos ~len;
   match Wire.message_type buf ~pos with
   | 'S' -> System_event (parse_system_event buf ~pos ~len)
   | 'R' -> Stock_directory (parse_stock_directory buf ~pos ~len)
