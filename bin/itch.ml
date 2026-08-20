@@ -206,9 +206,67 @@ let book_command =
                  show Buy "bids (high to low)"))))
 ;;
 
+module Checksum_reader = Reader.Make (Checksum)
+
+let checksum_command =
+  Command.basic
+    ~summary:
+      "Fold a file through the zero-allocation path and print the reference aggregate"
+    (let%map_open.Command path = anon ("FILE" %: Filename_unix.arg_type)
+     and compare_paths =
+       flag "-compare-paths" no_arg ~doc:" also run the allocating Message.t path"
+     and repeats =
+       flag "-repeats" (optional_with_default 1 int) ~doc:"N passes, for timing"
+     in
+     fun () ->
+       with_mapped_file path ~f:(fun buf ->
+         let len = Bigstring.length buf in
+         let state = Checksum.create () in
+         (* One untimed pass so the comparison is warm-cache throughput rather
+            than a measurement of how fast this disk is. *)
+         ignore (Checksum_reader.consume (Checksum.create ()) buf ~pos:0 ~len : int);
+         let best = ref Float.infinity in
+         for _ = 1 to repeats do
+           let state = Checksum.create () in
+           let start = Core_unix.gettimeofday () in
+           ignore (Checksum_reader.consume state buf ~pos:0 ~len : int);
+           let elapsed = Core_unix.gettimeofday () -. start in
+           if Float.( < ) elapsed !best then best := elapsed
+         done;
+         let consumed = Checksum_reader.consume state buf ~pos:0 ~len in
+         printf "%s\n" (Checksum.to_string state);
+         printf "consumed        %d bytes\n" consumed;
+         printf
+           "fastest of %d    %.4f s  (%.2f M msg/s, %.1f MB/s)\n"
+           repeats
+           !best
+           (Float.of_int state.messages /. !best /. 1e6)
+           (Float.of_int consumed /. !best /. 1e6);
+         if compare_paths
+         then (
+           let slow = Checksum.create () in
+           let start = Core_unix.gettimeofday () in
+           let slow_consumed =
+             Reader.iter buf ~pos:0 ~len ~f:(Checksum.of_message slow)
+           in
+           let elapsed = Core_unix.gettimeofday () -. start in
+           printf
+             "\nMessage.t path  %.4f s  (%.2f M msg/s)\n"
+             elapsed
+             (Float.of_int slow.messages /. elapsed /. 1e6);
+           printf
+             "paths agree     %b\n"
+             (String.equal (Checksum.to_string state) (Checksum.to_string slow)
+              && consumed = slow_consumed))))
+;;
+
 let () =
   Command_unix.run
     (Command.group
        ~summary:"Nasdaq TotalView-ITCH 5.0 tools"
-       [ "stats", stats_command; "dump", dump_command; "book", book_command ])
+       [ "stats", stats_command
+       ; "dump", dump_command
+       ; "book", book_command
+       ; "checksum", checksum_command
+       ])
 ;;

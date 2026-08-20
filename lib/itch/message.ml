@@ -184,7 +184,7 @@ module System_event = struct
     }
   [@@deriving compare, equal, sexp_of]
 
-  let length = 12
+  let length = Wire.System_event.length
 end
 
 module Stock_directory = struct
@@ -209,7 +209,7 @@ module Stock_directory = struct
     }
   [@@deriving compare, equal, sexp_of]
 
-  let length = 39
+  let length = Wire.Stock_directory.length
 end
 
 module Add_order = struct
@@ -229,8 +229,8 @@ module Add_order = struct
     }
   [@@deriving compare, equal, sexp_of]
 
-  let length_without_mpid = 36
-  let length_with_mpid = 40
+  let length_without_mpid = Wire.Add_order.length_without_mpid
+  let length_with_mpid = Wire.Add_order.length_with_mpid
 end
 
 (* Spec 1.4: "Modify Order messages always include the Order Reference Number of
@@ -250,7 +250,7 @@ module Order_executed = struct
     }
   [@@deriving compare, equal, sexp_of]
 
-  let length = 31
+  let length = Wire.Order_executed.length
 end
 
 (* Kept distinct from [Order_executed] rather than folded together the way "A"
@@ -271,7 +271,7 @@ module Order_executed_with_price = struct
     }
   [@@deriving compare, equal, sexp_of]
 
-  let length = 36
+  let length = Wire.Order_executed_with_price.length
 end
 
 (** A partial cancel: [cancelled_shares] comes {i off} the order's display size,
@@ -286,7 +286,7 @@ module Order_cancel = struct
     }
   [@@deriving compare, equal, sexp_of]
 
-  let length = 23
+  let length = Wire.Order_cancel.length
 end
 
 module Order_delete = struct
@@ -298,7 +298,7 @@ module Order_delete = struct
     }
   [@@deriving compare, equal, sexp_of]
 
-  let length = 19
+  let length = Wire.Order_delete.length
 end
 
 (** Spec 1.4.5: "Since the side, stock symbol and attribution (if any) cannot be
@@ -321,7 +321,7 @@ module Order_replace = struct
     }
   [@@deriving compare, equal, sexp_of]
 
-  let length = 35
+  let length = Wire.Order_replace.length
 end
 
 (** A message whose type is recognised by the framing but not yet decoded.
