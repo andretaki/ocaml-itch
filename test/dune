@@ -1,6 +1,6 @@
 (library
  (name itch_tests)
  (inline_tests)
- (libraries core itch)
+ (libraries core base_quickcheck itch)
  (preprocess
   (pps ppx_jane)))

@@ -50,7 +50,12 @@ let parse_stock_directory buf ~pos ~len : Message.Stock_directory.t =
        | 'N' -> false
        | c -> raise_s [%message "unknown ITCH round lots only flag" (c : char)])
   ; issue_classification = Bigstring.get buf (pos + 26)
-  ; issue_sub_type = Bigstring.To_string.sub buf ~pos:(pos + 27) ~len:2
+  ; issue_sub_type =
+      (* Space padded like every other alpha field, so it is stripped like every
+         other alpha field. Real values are one or two characters. *)
+      String.rstrip
+        ~drop:(Char.equal ' ')
+        (Bigstring.To_string.sub buf ~pos:(pos + 27) ~len:2)
   ; authenticity = Message.Authenticity.of_char_exn (Bigstring.get buf (pos + 29))
   ; short_sale_threshold_indicator =
       Message.Yes_no.of_char_exn (Bigstring.get buf (pos + 30))

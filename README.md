@@ -68,6 +68,13 @@ The parser is checked against ground truth, not against itself:
   to be subtly wrong and silently corrupt everything downstream.
 - **Spec-derived vectors.** Synthetic messages built by hand from the offset tables in
   the specification's sections 1.3 and 1.4.
+- **Round-trip property test.** 20,000 generated messages per run go `encode → frame →
+  decode` and must come back identical, which reaches field values no hand-written vector
+  would (64-bit order references near the native `int` ceiling, full-width `uint32`
+  prices). The generators emit wire-legal values only — every bound is a field width from
+  the spec — because a generator that emits an illegal value fails the round trip without
+  either side being wrong. The test is checked for teeth: injecting a one-byte offset
+  error into the encoder makes it fail with a counterexample.
 - **The whole book, cross-checked.** An independent order book implementation replays the
   same file and dumps best bid and ask for every symbol. All 700 books agree exactly, on
   both sides, in price and size.
@@ -121,8 +128,7 @@ dune exec bin/itch.exe -- dump data/prefix.itch50 -n 5
 
 ## Roadmap
 
-1. The remaining message types (`P` `Q` `B` `H` `Y` `L` `N`), and an encoder to drive
-   round-trip property tests.
+1. The remaining message types (`P` `Q` `B` `H` `Y` `L` `N`).
 3. Zero allocation on the hot path, with benchmarks.
 4. An [OxCaml](https://oxcaml.org/) branch using unboxed layouts and stack allocation,
    where `[@zero_alloc]` lets the compiler *prove* the parse path never allocates.

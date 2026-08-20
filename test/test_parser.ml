@@ -43,7 +43,7 @@ let%expect_test "real file prefix: system event and stock directory" =
      ((stock_locate 1) (tracking_number 0) (timestamp 11234909357323) (stock A)
       (market_category Nyse) (financial_status Not_available)
       (round_lot_size 100) (round_lots_only false) (issue_classification C)
-      (issue_sub_type "Z ") (authenticity Live)
+      (issue_sub_type Z) (authenticity Live)
       (short_sale_threshold_indicator (false)) (ipo_flag ())
       (luld_reference_price_tier Tier_1) (etp_flag (false))
       (etp_leverage_factor 0) (inverse_indicator false)))
