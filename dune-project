@@ -16,5 +16,6 @@
  (depends
   (ocaml (>= 5.2))
   core
+  core_unix
   base_bigstring
   (ppx_jane (>= v0.17))))
