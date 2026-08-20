@@ -82,6 +82,39 @@ The parser is checked against ground truth, not against itself:
   against live orders are maintained by different code paths; the replay checks that the
   two agree, per symbol, at the end of the file.
 
+## Performance
+
+Two decode paths. `Parser.parse_exn` returns a `Message.t` you can pattern match on, and
+allocates to do it. `Reader.Make (H)` dispatches into a handler whose callbacks take only
+immediates, and allocates nothing per message.
+
+On 254,895 messages of real exchange data (Intel Core Ultra 7 258V, WSL 2, fastest of 7):
+
+| | throughput | allocation |
+|---|---|---|
+| `Reader.Make` (handler) | ~172 M msg/s | **0 words per message** |
+| `Reader.iter` (`Message.t`) | ~49 M msg/s | 28 words per message |
+| C++ baseline, `-O3 -march=native` | ~317 M msg/s | n/a |
+
+The C++ program computes the same aggregate over the same file and prints it; the two
+lines must be byte-identical or the comparison is void. See [bench/README.md](bench/README.md)
+for the method and the caveats — including that the OCaml switch here has no flambda.
+
+**Getting to zero allocation was not where I expected.** It was not the records or the
+symbol strings. Core's `Bigstring.get_uint32_be` converts through a boxed `Int32.t`:
+
+```ocaml
+let get_uint32_be t ~pos = uint32_of_int32_t (get_int32_t_be t ~pos)
+```
+
+That is three words on every call, and ITCH reads a 32-bit field — a share count, a price,
+the low half of a timestamp — in nearly every message. `get_int32_be` reads straight to an
+unboxed `int`, and masking recovers the unsigned value exactly, including above 2^31. That
+one substitution took the handler path from 6 words per message to 0.
+
+The other one was a local `check` function inside the dispatch loop that captured the
+message length. A closure is a heap allocation, so that was one per message.
+
 ## Order book
 
 `Order_book` reconstructs the book by replaying the message stream. Two things make that

@@ -58,16 +58,28 @@ let check_length ~expected ~actual ~message_type =
     nothing -- see [test/test_zero_alloc.ml], which asserts exactly that over a
     real file and fails the build if it ever stops being true. *)
 module Make (H : Handler.S) = struct
+  (* The header fields are read inside each branch, after the length check,
+     rather than once up front. Reading them eagerly looked tidier and was
+     wrong: a message shorter than the 11-byte header -- which the framing
+     permits even though no real ITCH message is that short -- would have had
+     its timestamp read from bytes past the end of the message, and past the end
+     of the mapping entirely if it were the last one in the file.
+
+     Doing it this way also buys the safety argument that lets the field
+     accessors skip bounds checks: [consume] has already established that
+     [message_length] bytes are present, and [check_length] has established that
+     [message_length] is exactly the width the spec gives for this type, so
+     every field offset below is in bounds by construction.
+
+     [check_length] is called fully applied at each site rather than through a
+     local helper: a local function capturing [len] would be a closure, and a
+     closure is a heap allocation on every single message. *)
   let dispatch state buf ~pos ~len =
-    let stock_locate = Wire.stock_locate buf ~pos in
-    let timestamp = Wire.timestamp buf ~pos in
-    (* [check_length] is called fully applied at each site rather than through a
-       local helper: a local function capturing [len] would be a closure, and a
-       closure is a heap allocation on every single message. Exactly what
-       test_zero_alloc.ml exists to catch. *)
     match Wire.message_type buf ~pos with
     | 'A' | 'F' ->
       let attributed = Char.equal (Wire.message_type buf ~pos) 'F' in
+      let stock_locate = Wire.stock_locate buf ~pos in
+      let timestamp = Wire.timestamp buf ~pos in
       check_length
         ~expected:
           (if attributed
@@ -87,6 +99,8 @@ module Make (H : Handler.S) = struct
         ~price:(Wire.Add_order.price buf ~pos)
         ~attributed
     | 'E' ->
+      let stock_locate = Wire.stock_locate buf ~pos in
+      let timestamp = Wire.timestamp buf ~pos in
       check_length ~expected:Wire.Order_executed.length ~actual:len ~message_type:'E';
       H.on_order_executed
         state
@@ -96,6 +110,8 @@ module Make (H : Handler.S) = struct
         ~executed_shares:(Wire.Order_executed.executed_shares buf ~pos)
         ~match_number:(Wire.Order_executed.match_number buf ~pos)
     | 'C' ->
+      let stock_locate = Wire.stock_locate buf ~pos in
+      let timestamp = Wire.timestamp buf ~pos in
       check_length
         ~expected:Wire.Order_executed_with_price.length
         ~actual:len
@@ -110,6 +126,8 @@ module Make (H : Handler.S) = struct
         ~printable:(Char.equal (Wire.Order_executed_with_price.printable buf ~pos) 'Y')
         ~execution_price:(Wire.Order_executed_with_price.execution_price buf ~pos)
     | 'X' ->
+      let stock_locate = Wire.stock_locate buf ~pos in
+      let timestamp = Wire.timestamp buf ~pos in
       check_length ~expected:Wire.Order_cancel.length ~actual:len ~message_type:'X';
       H.on_order_cancel
         state
@@ -118,6 +136,8 @@ module Make (H : Handler.S) = struct
         ~order_ref:(Wire.Order_cancel.order_ref buf ~pos)
         ~cancelled_shares:(Wire.Order_cancel.cancelled_shares buf ~pos)
     | 'D' ->
+      let stock_locate = Wire.stock_locate buf ~pos in
+      let timestamp = Wire.timestamp buf ~pos in
       check_length ~expected:Wire.Order_delete.length ~actual:len ~message_type:'D';
       H.on_order_delete
         state
@@ -125,6 +145,8 @@ module Make (H : Handler.S) = struct
         ~timestamp
         ~order_ref:(Wire.Order_delete.order_ref buf ~pos)
     | 'U' ->
+      let stock_locate = Wire.stock_locate buf ~pos in
+      let timestamp = Wire.timestamp buf ~pos in
       check_length ~expected:Wire.Order_replace.length ~actual:len ~message_type:'U';
       H.on_order_replace
         state
@@ -135,6 +157,8 @@ module Make (H : Handler.S) = struct
         ~shares:(Wire.Order_replace.shares buf ~pos)
         ~price:(Wire.Order_replace.price buf ~pos)
     | 'S' ->
+      let stock_locate = Wire.stock_locate buf ~pos in
+      let timestamp = Wire.timestamp buf ~pos in
       check_length ~expected:Wire.System_event.length ~actual:len ~message_type:'S';
       H.on_system_event
         state
@@ -143,6 +167,8 @@ module Make (H : Handler.S) = struct
         ~timestamp
         ~event_code:(Wire.System_event.event_code buf ~pos)
     | 'R' ->
+      let stock_locate = Wire.stock_locate buf ~pos in
+      let timestamp = Wire.timestamp buf ~pos in
       check_length ~expected:Wire.Stock_directory.length ~actual:len ~message_type:'R';
       H.on_stock_directory state buf ~pos ~stock_locate ~timestamp
     | message_type -> H.on_other state buf ~pos ~message_type ~length:len
