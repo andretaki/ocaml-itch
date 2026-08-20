@@ -17,7 +17,21 @@ open! Core
     carries [stock_locate], a small dense integer that identifies the security
     for the day, and the Stock Directory spin at the start of the session maps
     locate to symbol once. Keying off the locate is not a workaround for the
-    allocation -- it is what the field is for. *)
+    allocation -- it is what the field is for.
+
+    Every callback below carries [@@zero_alloc], which turns the paragraph above
+    from a claim into a contract. On OxCaml the compiler refuses to accept an
+    implementation of this signature whose callbacks can allocate, and refuses
+    to accept {!Reader.Make} unless the whole dispatch loop is allocation free.
+    Vanilla OCaml ignores the attribute, so the same source builds on both; what
+    differs is whether the property is proved or merely tested. It is worth
+    having both: the checker found a 64-byte closure in [Reader.consume] that
+    the runtime test could not see, because that test asserts only that
+    allocation does not grow with message count.
+
+    Note that [@@zero_alloc] without [strict] permits allocation on the
+    exceptional path, which is what is wanted here -- {!Reader.check_length}
+    raises on a malformed length, and building that exception allocates. *)
 
 module type S = sig
   (** Handler state. Threaded explicitly rather than captured in a closure, so a
@@ -31,6 +45,7 @@ module type S = sig
     -> timestamp:int
     -> event_code:char
     -> unit
+  [@@zero_alloc]
 
   (** Once per symbol per session, so this one hands over the buffer and expects
       the handler to read the fields it wants through {!Wire.Stock_directory}. *)
@@ -41,6 +56,7 @@ module type S = sig
     -> stock_locate:int
     -> timestamp:int
     -> unit
+  [@@zero_alloc]
 
   (** [attributed] is true for an "F" message, in which case the four byte MPID
       sits at [Wire.Add_order.attribution_pos ~pos]. *)
@@ -56,6 +72,7 @@ module type S = sig
     -> price:int
     -> attributed:bool
     -> unit
+  [@@zero_alloc]
 
   val on_order_executed
     :  t
@@ -65,6 +82,7 @@ module type S = sig
     -> executed_shares:int
     -> match_number:int
     -> unit
+  [@@zero_alloc]
 
   val on_order_executed_with_price
     :  t
@@ -76,6 +94,7 @@ module type S = sig
     -> printable:bool
     -> execution_price:int
     -> unit
+  [@@zero_alloc]
 
   val on_order_cancel
     :  t
@@ -84,8 +103,10 @@ module type S = sig
     -> order_ref:int
     -> cancelled_shares:int
     -> unit
+  [@@zero_alloc]
 
   val on_order_delete : t -> stock_locate:int -> timestamp:int -> order_ref:int -> unit
+  [@@zero_alloc]
 
   val on_order_replace
     :  t
@@ -96,10 +117,12 @@ module type S = sig
     -> shares:int
     -> price:int
     -> unit
+  [@@zero_alloc]
 
   (** A message type this parser does not decode. Surfaced rather than skipped
       silently, matching the [Unparsed] case of {!Message.t}. *)
   val on_other : t -> Bigstring.t -> pos:int -> message_type:char -> length:int -> unit
+  [@@zero_alloc]
 end
 
 (** No-op implementations, so a handler can [include Ignore_all] and then define

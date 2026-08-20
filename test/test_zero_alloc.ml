@@ -159,8 +159,8 @@ let%expect_test "parsing through a handler allocates nothing per message" =
   printf "words attributable to them: %d\n" (large_words - small_words);
   [%expect
     {|
-    words per pass over  9,000 messages: 8
-    words per pass over 36,000 messages: 8
+    words per pass over  9,000 messages: 0
+    words per pass over 36,000 messages: 0
     extra messages: 27000
     words attributable to them: 0
     |}]
@@ -183,8 +183,18 @@ let%expect_test "for contrast, the Message.t path allocates" =
   done;
   let nine = Gc.minor_words () - before in
   let per_pass = (nine - one) / 8 in
-  printf "minor words per message: %d\n" (per_pass / (List.length sample_messages * 2_000));
-  [%expect {| minor words per message: 28 |}]
+  let per_message = per_pass / (List.length sample_messages * 2_000) in
+  (* The exact count is compiler dependent -- 28 words under
+     ocaml-base-compiler, 23 under flambda, which unboxes more -- so what gets
+     pinned is the band rather than a number that is only true on one switch.
+     Outside the band the real figure is printed and the test fails, which is
+     what a regression in either direction actually looks like. *)
+  printf
+    "minor words per message: %s\n"
+    (if per_message >= 15 && per_message <= 40
+     then "between 15 and 40"
+     else Int.to_string per_message);
+  [%expect {| minor words per message: between 15 and 40 |}]
 ;;
 
 (* The parse path reads a 32-bit field for a share count, a price or a timestamp

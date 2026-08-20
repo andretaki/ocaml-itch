@@ -81,6 +81,19 @@ The parser is checked against ground truth, not against itself:
 - **Invariants over real data.** Shares resting at price levels and shares recorded
   against live orders are maintained by different code paths; the replay checks that the
   two agree, per symbol, at the end of the file.
+- **A full trading session, replayed.** The whole of `01302020.NASDAQ_ITCH50` — 12,952,050,754
+  bytes, 423,285,709 messages, 417,219,234 of them book-affecting — replays with
+  `invariants ok`, consuming the file to the byte with no unconsumed tail. Two numbers
+  there are worth more than the pass itself: **orphans 0**, meaning no modify ever
+  referenced an order the book had not seen, and **live orders 0**, meaning the book
+  unwinds exactly to empty by the end of the day. A pre-market prefix cannot exercise
+  either, since it neither opens nor closes.
+- **Allocation proved, not just measured.** Under OxCaml the callbacks in `Handler.S`
+  carry `[@@zero_alloc]` and `Reader.Make`'s dispatch loop is checked against it, so the
+  compiler rejects the build if the decode path can allocate at all. This is strictly
+  stronger than the runtime test, which asserts only that allocation does not grow with
+  message count — and it earned its keep immediately by catching a 64-byte closure in
+  `Reader.consume` that the runtime test was blind to.
 
 ## Performance
 
@@ -157,6 +170,25 @@ AAPL (locate 13)
 ```
 
 That is Apple's real pre-market book at 04:00 on 2020-01-30.
+
+## Building
+
+```bash
+dune build && dune runtest
+```
+
+On the OxCaml switch, build with the release profile:
+
+```bash
+dune build --profile release && dune runtest --profile release
+```
+
+The `[@zero_alloc]` proofs need cross-module information about callees. Dune's dev
+profile passes `-opaque` to speed up incremental builds, which deliberately withholds
+exactly that, so the checker cannot see into a call and conservatively rejects it. The
+diagnostic in that case reads `called function may allocate (direct call caml_apply2)`,
+which is easy to misread as "your code allocates" when it means "I cannot see whether it
+does".
 
 ## Quick start
 

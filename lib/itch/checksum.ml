@@ -82,7 +82,7 @@ let note t ~stock_locate ~timestamp =
   if stock_locate > t.max_locate then t.max_locate <- stock_locate
 ;;
 
-let on_system_event t ~stock_locate ~tracking_number ~timestamp ~event_code =
+let[@zero_alloc] on_system_event t ~stock_locate ~tracking_number ~timestamp ~event_code =
   note t ~stock_locate ~timestamp;
   t.system_events <- t.system_events + 1;
   t.sum_shares <- t.sum_shares + tracking_number + Char.to_int event_code
@@ -94,7 +94,7 @@ let add_stock_directory t ~stock_locate ~timestamp ~round_lot_size =
   t.sum_shares <- t.sum_shares + round_lot_size
 ;;
 
-let on_stock_directory t buf ~pos ~stock_locate ~timestamp =
+let[@zero_alloc] on_stock_directory t buf ~pos ~stock_locate ~timestamp =
   add_stock_directory
     t
     ~stock_locate
@@ -110,7 +110,7 @@ let add_add_order t ~stock_locate ~timestamp ~order_ref ~side ~shares ~price ~at
   t.xor_order_refs <- t.xor_order_refs lxor order_ref
 ;;
 
-let on_add_order
+let[@zero_alloc] on_add_order
       t
       _buf
       ~pos:_
@@ -125,7 +125,7 @@ let on_add_order
   add_add_order t ~stock_locate ~timestamp ~order_ref ~side ~shares ~price ~attributed
 ;;
 
-let on_order_executed t ~stock_locate ~timestamp ~order_ref ~executed_shares ~match_number
+let[@zero_alloc] on_order_executed t ~stock_locate ~timestamp ~order_ref ~executed_shares ~match_number
   =
   note t ~stock_locate ~timestamp;
   t.executes <- t.executes + 1;
@@ -133,7 +133,7 @@ let on_order_executed t ~stock_locate ~timestamp ~order_ref ~executed_shares ~ma
   t.xor_order_refs <- t.xor_order_refs lxor order_ref lxor match_number
 ;;
 
-let on_order_executed_with_price
+let[@zero_alloc] on_order_executed_with_price
       t
       ~stock_locate
       ~timestamp
@@ -150,20 +150,20 @@ let on_order_executed_with_price
   t.xor_order_refs <- t.xor_order_refs lxor order_ref lxor match_number
 ;;
 
-let on_order_cancel t ~stock_locate ~timestamp ~order_ref ~cancelled_shares =
+let[@zero_alloc] on_order_cancel t ~stock_locate ~timestamp ~order_ref ~cancelled_shares =
   note t ~stock_locate ~timestamp;
   t.cancels <- t.cancels + 1;
   t.sum_shares <- t.sum_shares + cancelled_shares;
   t.xor_order_refs <- t.xor_order_refs lxor order_ref
 ;;
 
-let on_order_delete t ~stock_locate ~timestamp ~order_ref =
+let[@zero_alloc] on_order_delete t ~stock_locate ~timestamp ~order_ref =
   note t ~stock_locate ~timestamp;
   t.deletes <- t.deletes + 1;
   t.xor_order_refs <- t.xor_order_refs lxor order_ref
 ;;
 
-let on_order_replace
+let[@zero_alloc] on_order_replace
       t
       ~stock_locate
       ~timestamp
@@ -185,7 +185,7 @@ let add_other t ~message_type ~length =
   t.sum_shares <- t.sum_shares + Char.to_int message_type + length
 ;;
 
-let on_other t _buf ~pos:_ ~message_type ~length = add_other t ~message_type ~length
+let[@zero_alloc] on_other t _buf ~pos:_ ~message_type ~length = add_other t ~message_type ~length
 
 (** Drive the same arithmetic from an already decoded {!Message.t}.
 

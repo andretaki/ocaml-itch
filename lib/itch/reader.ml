@@ -74,7 +74,7 @@ module Make (H : Handler.S) = struct
      [check_length] is called fully applied at each site rather than through a
      local helper: a local function capturing [len] would be a closure, and a
      closure is a heap allocation on every single message. *)
-  let dispatch state buf ~pos ~len =
+  let[@zero_alloc] dispatch state buf ~pos ~len =
     match Wire.message_type buf ~pos with
     | 'A' | 'F' ->
       let attributed = Char.equal (Wire.message_type buf ~pos) 'F' in
@@ -174,23 +174,30 @@ module Make (H : Handler.S) = struct
     | message_type -> H.on_other state buf ~pos ~message_type ~length:len
   ;;
 
-  (** Returns the number of bytes consumed, leaving any trailing partial message
-      unconsumed exactly as {!fold} does. *)
-  let consume state buf ~pos ~len =
-    let limit = pos + len in
-    let rec loop p =
-      if p + length_prefix_bytes > limit
+  (* Implementation detail of [consume]. It takes its state as arguments rather
+     than capturing it: written the obvious way, as a local [let rec] closing
+     over [state], [buf], [pos] and [limit], it costs a 64-byte closure on every
+     call to [consume]. That is once per call rather than once per message, so
+     the runtime allocation test -- which asserts only that allocation does not
+     grow with message count -- cannot see it. OxCaml's [@zero_alloc] checker
+     does, and reports it as "allocation of 64 bytes for closure". *)
+  let rec consume_loop state buf ~pos ~limit p =
+    if p + length_prefix_bytes > limit
+    then p - pos
+    else (
+      let message_length = Bigstring.get_uint16_be buf ~pos:p in
+      if message_length = 0
+      then p - pos
+      else if p + length_prefix_bytes + message_length > limit
       then p - pos
       else (
-        let message_length = Bigstring.get_uint16_be buf ~pos:p in
-        if message_length = 0
-        then p - pos
-        else if p + length_prefix_bytes + message_length > limit
-        then p - pos
-        else (
-          dispatch state buf ~pos:(p + length_prefix_bytes) ~len:message_length;
-          loop (p + length_prefix_bytes + message_length)))
-    in
-    loop pos
+        dispatch state buf ~pos:(p + length_prefix_bytes) ~len:message_length;
+        consume_loop state buf ~pos ~limit (p + length_prefix_bytes + message_length)))
+  ;;
+
+  (** Returns the number of bytes consumed, leaving any trailing partial message
+      unconsumed exactly as {!fold} does. *)
+  let[@zero_alloc] consume state buf ~pos ~len =
+    consume_loop state buf ~pos ~limit:(pos + len) pos
   ;;
 end

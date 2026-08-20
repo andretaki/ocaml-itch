@@ -1,6 +1,7 @@
-_build/
+# One build directory per opam switch: the base compiler, flambda and OxCaml
+# each need their own so they do not clobber each other's artifacts.
+_build*/
 _opam/
 *.install
 data/
 bench/cpp/baseline
-_build-flambda/
