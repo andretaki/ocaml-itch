@@ -67,7 +67,45 @@ The parser is checked against ground truth, not against itself:
 - **48-bit timestamp assembly** is verified separately — it is the arithmetic most likely
   to be subtly wrong and silently corrupt everything downstream.
 - **Spec-derived vectors.** Synthetic messages built by hand from the offset tables in
-  the specification's section 1.3.
+  the specification's sections 1.3 and 1.4.
+- **The whole book, cross-checked.** An independent order book implementation replays the
+  same file and dumps best bid and ask for every symbol. All 700 books agree exactly, on
+  both sides, in price and size.
+- **Invariants over real data.** Shares resting at price levels and shares recorded
+  against live orders are maintained by different code paths; the replay checks that the
+  two agree, per symbol, at the end of the file.
+
+## Order book
+
+`Order_book` reconstructs the book by replaying the message stream. Two things make that
+less mechanical than it looks:
+
+- The modify messages carry only an order reference — not the side, symbol or price of the
+  order they modify. The book has to remember every live order, and a modify for an
+  unknown reference cannot be applied at all. Starting mid-stream that is expected rather
+  than exceptional, so those are counted as orphans, and the count is a diagnostic.
+- The arithmetic differs between messages that look alike. A cancel carries shares to
+  *subtract*; a replace carries the new *total*. Inverting either produces a book that
+  looks plausible and is wrong.
+
+```
+$ dune exec bin/itch.exe -- book data/prefix.itch50 -symbol AAPL
+replayed        7230995 bytes in 0.010 s
+book messages   11447 applied
+orphans         0 (modify for an order not seen)
+live orders     3197
+invariants      ok
+
+AAPL (locate 13)
+  asks (low to high)
+        321.7900        30
+        321.8000       200
+  bids (high to low)
+        321.0100        30
+        321.0000        25
+```
+
+That is Apple's real pre-market book at 04:00 on 2020-01-30.
 
 ## Quick start
 
@@ -83,8 +121,8 @@ dune exec bin/itch.exe -- dump data/prefix.itch50 -n 5
 
 ## Roadmap
 
-1. The remaining message types, and an encoder to drive round-trip property tests.
-2. Limit order book reconstruction: `add` / `execute` / `cancel` / `delete` / `replace`.
+1. The remaining message types (`P` `Q` `B` `H` `Y` `L` `N`), and an encoder to drive
+   round-trip property tests.
 3. Zero allocation on the hot path, with benchmarks.
 4. An [OxCaml](https://oxcaml.org/) branch using unboxed layouts and stack allocation,
    where `[@zero_alloc]` lets the compiler *prove* the parse path never allocates.

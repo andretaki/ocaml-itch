@@ -125,9 +125,90 @@ let dump_command =
          | Exit -> ()))
 ;;
 
+let book_command =
+  Command.basic
+    ~summary:"Reconstruct the limit order book by replaying an ITCH 5.0 file"
+    (let%map_open.Command path = anon ("FILE" %: Filename_unix.arg_type)
+     and symbol = flag "-symbol" (optional string) ~doc:"SYM show depth for a symbol"
+     and levels =
+       flag "-levels" (optional_with_default 5 int) ~doc:"N price levels per side"
+     and tops =
+       flag
+         "-tops"
+         no_arg
+         ~doc:
+           " print locate,bid_price,bid_shares,ask_price,ask_shares for every book, for \
+            cross-checking against an independent implementation"
+     in
+     fun () ->
+       with_mapped_file path ~f:(fun buf ->
+         let books = Order_book.create () in
+         (* Locate codes are assigned per day by the Stock Directory spin, so the
+            symbol to locate mapping has to be learned from the file itself. *)
+         let locate_of_symbol = String.Table.create () in
+         let start = Core_unix.gettimeofday () in
+         let consumed =
+           Reader.iter buf ~pos:0 ~len:(Bigstring.length buf) ~f:(fun message ->
+             (match message with
+              | Stock_directory m ->
+                Hashtbl.set
+                  locate_of_symbol
+                  ~key:(Types.Stock.to_string m.stock)
+                  ~data:m.stock_locate
+              | _ -> ());
+             Order_book.apply books message)
+         in
+         let elapsed = Core_unix.gettimeofday () -. start in
+         printf "replayed        %d bytes in %.3f s\n" consumed elapsed;
+         printf "book messages   %d applied\n" (Order_book.applied books);
+         printf
+           "orphans         %d (modify for an order not seen)\n"
+           (Order_book.orphans books);
+         printf "live orders     %d\n" (Order_book.orders_live books);
+         (match Order_book.check_invariants books with
+          | Ok () -> printf "invariants      ok\n"
+          | Error error -> printf !"invariants      FAILED: %{Error#hum}\n" error);
+         if tops
+         then
+           List.iter (Order_book.locates books) ~f:(fun locate ->
+             match Order_book.book_for books locate with
+             | None -> ()
+             | Some book ->
+               let field = function
+                 | None -> "-,-"
+                 | Some (price, shares) ->
+                   sprintf "%d,%d" (Types.Price.to_raw_4 price) shares
+               in
+               printf
+                 "%d,%s,%s\n"
+                 (Types.Locate.to_int locate)
+                 (field (Order_book.Book.best_bid book))
+                 (field (Order_book.Book.best_ask book)));
+         match symbol with
+         | None -> ()
+         | Some symbol ->
+           (match Hashtbl.find locate_of_symbol symbol with
+            | None -> printf "\nno stock directory entry for %s\n" symbol
+            | Some locate ->
+              (match Order_book.book_for books locate with
+               | None -> printf "\nno book for %s\n" symbol
+               | Some book ->
+                 printf "\n%s (locate %d)\n" symbol (Types.Locate.to_int locate);
+                 let show side label =
+                   printf "  %s\n" label;
+                   match Order_book.Book.depth book side ~levels with
+                   | [] -> printf "    (empty)\n"
+                   | levels ->
+                     List.iter levels ~f:(fun (price, shares) ->
+                       printf "    %12s  %8d\n" (Types.Price.to_string price) shares)
+                 in
+                 show Sell "asks (low to high)";
+                 show Buy "bids (high to low)"))))
+;;
+
 let () =
   Command_unix.run
     (Command.group
        ~summary:"Nasdaq TotalView-ITCH 5.0 tools"
-       [ "stats", stats_command; "dump", dump_command ])
+       [ "stats", stats_command; "dump", dump_command; "book", book_command ])
 ;;
