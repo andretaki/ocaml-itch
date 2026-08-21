@@ -1,6 +1,16 @@
 (library
  (name itch_tests)
  (inline_tests)
+ (modules :standard \ gen_corpus)
  (libraries core base_quickcheck itch)
+ (preprocess
+  (pps ppx_jane)))
+
+; Not a test: a helper that writes a synthetic corpus so CI can check
+; cross-implementation agreement without the real exchange files.
+(executable
+ (name gen_corpus)
+ (modules gen_corpus)
+ (libraries core core_unix.bigstring_unix base_quickcheck itch itch_tests)
  (preprocess
   (pps ppx_jane)))

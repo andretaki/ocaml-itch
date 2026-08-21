@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -33,3 +34,121 @@ jobs:
 
       - name: Test
         run: opam exec -- dune runtest
+
+  # flambda is the fair vanilla baseline for the benchmark, and it optimises
+  # differently enough to have caught a compiler-dependent expect test before.
+  flambda:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up OCaml 5.2 with flambda
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ocaml-variants.5.2.0+options,ocaml-option-flambda
+
+      - name: Install dependencies
+        run: opam install . --deps-only --with-test
+
+      - name: Build
+        run: opam exec -- dune build
+
+      - name: Test
+        run: opam exec -- dune runtest
+
+  # The C++ baseline is only meaningful if it still agrees with the OCaml, and
+  # nothing else in CI compiles it. This does not time anything -- a shared
+  # runner cannot produce a benchmark worth reporting -- it checks agreement on
+  # a generated corpus, which is what makes the timings comparable when they are
+  # taken on a quiet machine.
+  aggregate-agreement:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.2"
+
+      - name: Install dependencies
+        run: opam install . --deps-only --with-test
+
+      - name: Build
+        run: opam exec -- dune build
+
+      - name: Build C++ baseline
+        run: g++ -O3 -std=c++20 -o bench/cpp/baseline bench/cpp/baseline.cpp
+
+      - name: Generate a corpus and compare aggregates
+        run: |
+          set -euo pipefail
+          opam exec -- ./_build/default/test/gen_corpus.exe /tmp/corpus.itch50 20000
+          opam exec -- ./_build/default/bin/itch.exe checksum /tmp/corpus.itch50 | head -1 > /tmp/ml.txt
+          ./bench/cpp/baseline /tmp/corpus.itch50 1 | head -1 > /tmp/cpp.txt
+          echo "OCaml: $(cat /tmp/ml.txt)"
+          echo "C++  : $(cat /tmp/cpp.txt)"
+          diff /tmp/ml.txt /tmp/cpp.txt
+
+  # The [@@zero_alloc] contract on Handler.S is the strongest claim this project
+  # makes, and it is only checked by OxCaml, and only under --profile release
+  # (dune's dev profile passes -opaque, which withholds the cross-module
+  # information the checker needs). Without this job the claim is unenforced.
+  #
+  # Building the OxCaml compiler from source is slow (tens of minutes) and this
+  # job has not yet had a green run, so it is on-demand only for now. Once it
+  # has passed from the Actions tab, change the condition to
+  # `github.event_name != 'pull_request'` so it gates main.
+  oxcaml-zero-alloc:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up opam
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.2"
+
+      - name: Create the OxCaml switch
+        run: |
+          set -euo pipefail
+          opam repository add ox git+https://github.com/oxcaml/opam-repository.git --all-switches --set-default
+          opam switch create ox --repos ox,default --packages ocaml-variants.5.2.0+ox
+          opam install --switch=ox core core_unix base_bigstring ppx_jane base_quickcheck -y
+
+      - name: Build with --profile release (this is what checks [@zero_alloc])
+        run: opam exec --switch=ox -- dune build --profile release
+
+      - name: Prove the checker is live
+        run: |
+          set -euo pipefail
+          # An annotation that only ever passes proves nothing. padded_string
+          # builds a string, so [@zero_alloc] on it MUST be rejected.
+          cp lib/itch/wire.ml /tmp/wire.orig
+          sed -i 's/^let padded_string buf ~pos ~len =/let[@zero_alloc] padded_string buf ~pos ~len =/' lib/itch/wire.ml
+          if opam exec --switch=ox -- dune build --profile release --build-dir=_build-probe 2>/dev/null; then
+            cp /tmp/wire.orig lib/itch/wire.ml
+            echo "FAIL: [@zero_alloc] accepted a function that allocates -- the checker is not running"
+            exit 1
+          fi
+          cp /tmp/wire.orig lib/itch/wire.ml
+          echo "OK: the checker rejected a genuinely allocating function"
+
+      - name: Test on OxCaml
+        run: |
+          set -euo pipefail
+          # dune runtest cannot be used here: ppx_expect v0.18~preview resolves
+          # the corrected-file path with Filename.basename, so any expect test in
+          # a subdirectory crashes the runner even when every test passes.
+          opam exec --switch=ox -- dune build --profile release @check || true
+          opam exec --switch=ox -- dune runtest --profile release > /dev/null 2>&1 || true
+          cd _build/default/test
+          for p in test_parser test_order_book test_differential test_roundtrip test_zero_alloc; do
+            ./.itch_tests.inline-tests/inline-test-runner.exe inline-test-runner itch_tests \
+              -partition "$p.ml" -source-tree-root . -diff-cmd - -show-counts
+          done
