@@ -81,6 +81,19 @@ The parser is checked against ground truth, not against itself:
 - **Invariants over real data.** Shares resting at price levels and shares recorded
   against live orders are maintained by different code paths; the replay checks that the
   two agree, per symbol, at the end of the file.
+- **Decoded prices checked against the real world.** The sharpest check turns out to be the
+  cheapest: replay the session and compare a few reconstructed books against what those
+  stocks actually traded at. On 2020-01-30 this parser reconstructs AAPL at 321.01/321.79,
+  MSFT at 170.78/174.59 and F at 8.75/9.29 — matching the real market across two orders of
+  magnitude, with the bid below the ask in every book. That single check exercises the
+  price offset, the four-decimal fixed point, side decoding, share counts and the
+  locate-to-symbol mapping at once, and unlike every other check here its ground truth is
+  external to the project rather than another program written by the same author.
+
+  ```bash
+  dune exec bin/itch.exe -- book data/prefix.itch50 -symbol AAPL -levels 3
+  ```
+
 - **A full trading session, replayed.** The whole of `01302020.NASDAQ_ITCH50` — 12,952,050,754
   bytes, 423,285,709 messages, 417,219,234 of them book-affecting — replays with
   `invariants ok`, consuming the file to the byte with no unconsumed tail. Two numbers
