@@ -32,7 +32,7 @@ let%expect_test "zero-allocation path agrees with the Message.t path" =
     {|
     paths agree
     consumed 14450 bytes
-    messages=450 adds=100 executes=100 cancels=50 deletes=50 replaces=50 directories=50 system_events=50 others=0 sum_shares=63250 sum_prices=200700000 xor_order_refs=0 xor_timestamps=0 max_locate=7
+    messages=450 adds=100 executes=100 cancels=50 deletes=50 replaces=50 directories=50 system_events=50 others=0 sum_shares=63250 sum_prices=200700000 xor_order_refs=0 xor_match_numbers=0 xor_new_refs=0 xor_timestamps=0 max_locate=7
     |}]
 ;;
 
@@ -59,6 +59,6 @@ let%expect_test "the two paths agree on generated messages too" =
     {|
     paths agree
     consumed 62483 bytes
-    messages=2000 adds=272 executes=453 cancels=234 deletes=226 replaces=282 directories=259 system_events=274 others=0 sum_shares=3202042149125 sum_prices=1647707133215 xor_order_refs=2844687346362742526 xor_timestamps=77315418369805 max_locate=65535
+    messages=2000 adds=272 executes=453 cancels=234 deletes=226 replaces=282 directories=259 system_events=274 others=0 sum_shares=3202042149125 sum_prices=1647707133215 xor_order_refs=1597701289188623465 xor_match_numbers=40666094190709334 xor_new_refs=3586564404211726529 xor_timestamps=77315418369805 max_locate=65535
     |}]
 ;;

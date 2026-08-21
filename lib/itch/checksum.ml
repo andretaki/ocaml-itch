@@ -15,7 +15,19 @@ open! Core
 
     The accumulators are chosen so the arithmetic is exact and identical in any
     language with 64-bit integers: xor never overflows, and the sums stay far
-    below 2^62 even over a full trading day. *)
+    below 2^62 even over a full trading day.
+
+    Order references are folded into {i three} separate accumulators rather than
+    one, and that is not redundancy. Xor is commutative, so a single accumulator
+    taking [order_ref lxor match_number] is unchanged when those two arguments
+    are swapped -- and swapping two adjacent 8-byte fields is exactly the mistake
+    the differential test exists to catch. Measured: injecting that swap at the
+    dispatch site in {!Reader.Make} left all 21 tests passing and produced a
+    byte-identical aggregate, so the C++ comparison would have passed too.
+    Separate accumulators are used instead of multiplying by distinct constants
+    because a product can overflow, and OCaml's 63-bit int wraps where C++'s
+    int64 does not -- which would break the byte-identical comparison this whole
+    design rests on. *)
 
 type t =
   { mutable messages : int
@@ -30,6 +42,8 @@ type t =
   ; mutable sum_shares : int
   ; mutable sum_prices : int
   ; mutable xor_order_refs : int
+  ; mutable xor_match_numbers : int
+  ; mutable xor_new_refs : int
   ; mutable xor_timestamps : int
   ; mutable max_locate : int
   }
@@ -47,6 +61,8 @@ let create () =
   ; sum_shares = 0
   ; sum_prices = 0
   ; xor_order_refs = 0
+  ; xor_match_numbers = 0
+  ; xor_new_refs = 0
   ; xor_timestamps = 0
   ; max_locate = 0
   }
@@ -56,7 +72,7 @@ let to_string t =
   sprintf
     "messages=%d adds=%d executes=%d cancels=%d deletes=%d replaces=%d directories=%d \
      system_events=%d others=%d sum_shares=%d sum_prices=%d xor_order_refs=%d \
-     xor_timestamps=%d max_locate=%d"
+     xor_match_numbers=%d xor_new_refs=%d xor_timestamps=%d max_locate=%d"
     t.messages
     t.adds
     t.executes
@@ -69,6 +85,8 @@ let to_string t =
     t.sum_shares
     t.sum_prices
     t.xor_order_refs
+    t.xor_match_numbers
+    t.xor_new_refs
     t.xor_timestamps
     t.max_locate
 ;;
@@ -130,7 +148,8 @@ let[@zero_alloc] on_order_executed t ~stock_locate ~timestamp ~order_ref ~execut
   note t ~stock_locate ~timestamp;
   t.executes <- t.executes + 1;
   t.sum_shares <- t.sum_shares + executed_shares;
-  t.xor_order_refs <- t.xor_order_refs lxor order_ref lxor match_number
+  t.xor_order_refs <- t.xor_order_refs lxor order_ref;
+  t.xor_match_numbers <- t.xor_match_numbers lxor match_number
 ;;
 
 let[@zero_alloc] on_order_executed_with_price
@@ -147,7 +166,8 @@ let[@zero_alloc] on_order_executed_with_price
   t.executes <- t.executes + 1;
   t.sum_shares <- t.sum_shares + executed_shares + Bool.to_int printable;
   t.sum_prices <- t.sum_prices + execution_price;
-  t.xor_order_refs <- t.xor_order_refs lxor order_ref lxor match_number
+  t.xor_order_refs <- t.xor_order_refs lxor order_ref;
+  t.xor_match_numbers <- t.xor_match_numbers lxor match_number
 ;;
 
 let[@zero_alloc] on_order_cancel t ~stock_locate ~timestamp ~order_ref ~cancelled_shares =
@@ -176,7 +196,8 @@ let[@zero_alloc] on_order_replace
   t.replaces <- t.replaces + 1;
   t.sum_shares <- t.sum_shares + shares;
   t.sum_prices <- t.sum_prices + price;
-  t.xor_order_refs <- t.xor_order_refs lxor original_order_ref lxor new_order_ref
+  t.xor_order_refs <- t.xor_order_refs lxor original_order_ref;
+  t.xor_new_refs <- t.xor_new_refs lxor new_order_ref
 ;;
 
 let add_other t ~message_type ~length =

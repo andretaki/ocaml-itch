@@ -88,6 +88,14 @@ The parser is checked against ground truth, not against itself:
   referenced an order the book had not seen, and **live orders 0**, meaning the book
   unwinds exactly to empty by the end of the day. A pre-market prefix cannot exercise
   either, since it neither opens nor closes.
+- **The two decode paths must agree.** `Reader.Make`'s handler path and the allocating
+  `Message.t` path are separate dispatch code, and both are folded into the same aggregate
+  over the same bytes; a disagreement fails the build. This check was audited and found
+  **blind** in one specific way, then fixed: order references were folded as
+  `order_ref lxor match_number`, and because xor is commutative, swapping those two
+  arguments left the aggregate bit-identical. Injecting exactly that swap at the dispatch
+  site passed all 21 tests *and* produced a byte-identical C++ comparison. Order references
+  now go into three separate accumulators, and the same injected swap is caught.
 - **Allocation proved, not just measured.** Under OxCaml the callbacks in `Handler.S`
   carry `[@@zero_alloc]` and `Reader.Make`'s dispatch loop is checked against it, so the
   compiler rejects the build if the decode path can allocate at all. This is strictly
