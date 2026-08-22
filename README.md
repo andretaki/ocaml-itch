@@ -134,6 +134,31 @@ The parser is checked against ground truth, not against itself:
   referenced an order the book had not seen, and **live orders 0**, meaning the book
   unwinds exactly to empty by the end of the day. A pre-market prefix cannot exercise
   either, since it neither opens nor closes.
+- **The session analysis has its own third implementation.**
+  `test/cross_check_lifetime.py` decodes the same bytes from the spec tables with its own
+  hand-transcribed offsets and computes the same fifteen exact integers: message and
+  decode counts, the four terminal causes, the exact sum, minimum and maximum of every
+  order lifetime, and the busiest millisecond. It agrees with the OCaml across the entire
+  12.95 GB session — all fifteen fields, 423,285,709 messages.
+
+  What it compares is deliberately *not* the percentile table. Percentiles come out of a
+  bucketed histogram, so two correct implementations may legitimately disagree on one, and
+  a comparison that tolerates disagreement is not a comparison. Every field checked has
+  exactly one right answer. The subtle ones are the terminal causes: a partial execution
+  or partial cancel is *not* a death, so reading a share count as a new total rather than
+  a delta silently moves orders between causes without raising anywhere. CI injects that
+  exact mistake and requires the comparison to report it.
+
+- **An overflow the tests did not catch, and now do.** The first full-day run reported a
+  **mean order lifetime of -13.6 seconds**. A day's 223 million lifetimes sum to
+  4.31e19 nanoseconds and an OCaml int holds 4.6e18, so the accumulator had wrapped —
+  silently, and not always to a negative: the same wrap on the `deleted` bucket alone
+  turned 3.7 minutes into a plausible-looking 15.3 seconds. Every unit test passed
+  throughout, because none of them summed anything that large. The total is now carried in
+  two limbs of base 2^30, exactly rather than in a float, so that an independent
+  implementation can still check it; and `test_histogram.ml` now records values past the
+  int range and pins the exact answer.
+
 - **The two decode paths must agree.** `Reader.Make`'s handler path and the allocating
   `Message.t` path are separate dispatch code, and both are folded into the same aggregate
   over the same bytes; a disagreement fails the build. This check was audited and found
@@ -148,6 +173,16 @@ The parser is checked against ground truth, not against itself:
   stronger than the runtime test, which asserts only that allocation does not grow with
   message count — and it earned its keep immediately by catching a 64-byte closure in
   `Reader.consume` that the runtime test was blind to.
+
+  It has now caught a second one, in the Level 4 analysis handler: `Histogram.t` is
+  abstract outside its own module, so indexing a `Histogram.t array` cannot be proved not
+  to be indexing a flat float array, and the compiler emitted the boxing read —
+  *"allocation of 16 bytes for float"*, once per terminated order, 223 million times over
+  a session. Vanilla OCaml compiled it without a word, and the existing runtime allocation
+  test could not have seen it either, because that test drives the `Checksum` handler and
+  not this one. Named record fields have a statically known type and read flat. There is
+  now a runtime allocation test for this handler too, so both switches have something to
+  say about it.
 
   CI enforces it, on every push to `main`, by building the OxCaml compiler from source and
   compiling with `--profile release` — the annotations are inert without it, because dune's
@@ -251,6 +286,97 @@ AAPL (locate 13)
 
 That is Apple's real pre-market book at 04:00 on 2020-01-30.
 
+## Order lifetime and message rate
+
+`itch analyze` replays a session and answers two questions that fall straight out of the
+parser and the book, in one pass over the file. Both are measured here on the full
+`01302020.NASDAQ_ITCH50` session — 12.95 GB, 423,285,709 messages, 03:02 to 20:05.
+
+**How long does a resting order live?** The book cannot answer this: it tracks shares at a
+price level and deliberately forgets when an order arrived. `Analysis` keeps a live-order
+table keyed by reference and records `death - birth` when the reference leaves.
+
+| | all terminated | executed | deleted | replaced |
+|---|---|---|---|---|
+| orders | 223,388,077 | 6,325,604 | 180,285,101 | 36,777,372 |
+| share | | 2.83% | 80.70% | 16.46% |
+| p1 | 28 µs | 32 µs | 32 µs | 18 µs |
+| p10 | 557 µs | 885 µs | 606 µs | 377 µs |
+| p50 | 889 ms | 6.0 s | 956 ms | 453 ms |
+| p90 | 32.8 s | 2.0 min | 30.1 s | 32.8 s |
+| p99 | 40.1 min | 41.2 min | 58.4 min | 16.3 min |
+| mean | 3.2 min | 2.1 min | 3.7 min | 1.2 min |
+| min | 157 ns | 157 ns | 246 ns | 9.7 µs |
+| max | 16.0 h | 13.0 h | 16.0 h | 7.2 h |
+
+Percentiles are histogram buckets, not exact values: the bucket holding a value is never
+wider than `value / 32`, so each figure above is exact to about 3%. The mean, the min and
+the max are exact.
+
+Three things stand out.
+
+- **Only 2.83% of orders ever execute.** Four in five are deleted outright and one in six
+  is replaced. Whatever an order book is mostly doing, it is not trading.
+- **The distribution has no typical value.** The median order lives 889 ms and the mean
+  lives 3.2 minutes, because the tail runs to sixteen hours. Quoting either number alone
+  is misleading, which is why the whole distribution is here.
+- **Sub-millisecond orders are a minority, not the story.** 12.31% of orders live less
+  than a millisecond and 6.30% less than 100 µs. That is a real tail — the shortest-lived
+  order of the day lasted 157 nanoseconds — but it is not most of them, and the folklore
+  that most orders are cancelled within a millisecond does not survive the measurement.
+  Half of all orders live longer than 889 ms.
+- **`X` never once ended an order.** Not in 4,990,972 Order Cancel messages across the
+  whole day. NASDAQ shrinks an order with `X` and withdraws it with `D`, so the
+  "cancelled" row of the table is empty on real data — which is indistinguishable from a
+  broken code path until you exercise it synthetically, and `test_analysis.ml` does.
+
+**How bad is the worst millisecond?** Every message is counted, including the types this
+parser does not decode, because a feed handler has to keep up with the whole stream and
+not just the part it understands.
+
+| | |
+|---|---|
+| milliseconds in session | 61,346,597 |
+| empty milliseconds | 33,957,504 (55.35%) |
+| mean | 6.9 msg/ms |
+| p90 | 17 msg/ms |
+| p99 | 84 msg/ms |
+| p99.9 | 344 msg/ms |
+| p99.99 | 1,088 msg/ms |
+| **peak** | **1,746 msg/ms**, at 16:00:00.017 |
+| peak / mean | 253× |
+
+The median millisecond of the trading day carries *no messages at all*, and the busiest
+one carries 1,746 — at seventeen milliseconds past four o'clock, which is the closing
+auction. A handler sized for the average is sized 253× too small. Empty milliseconds are
+included in that average deliberately: a feed handler has to survive the peak whether or
+not the quiet periods flatter its average.
+
+```
+$ dune exec bin/itch.exe -- analyze data/01302020.NASDAQ_ITCH50
+messages        423285709
+session         03:02:33.404452051 to 20:05:00.000039817
+live table      1925638 of 33554432 slots used at peak (5.7%)
+orphan modifies 0 (modify for an order never seen)
+still resting   0 at end of file
+```
+
+`orphan modifies 0` means every one of the 230.6 million modify messages named an order the
+table already held, and `still resting 0` means the table unwinds to exactly empty at the
+close. Neither is testable on a prefix. The run also asserts, 223.4 million times, that no
+order reference is added while another with the same reference is still live.
+
+Three counts have to reconcile, and do, exactly:
+
+- **References born equal references terminated.** 186,610,705 `A`/`F` adds plus
+  36,777,372 `U` replacements is 223,388,077, which is the number of terminations to the
+  order. Nothing was left over and nothing was counted twice.
+- **Decoded messages reconcile with the type histogram.** The 417,228,156 decoded here is
+  `S`+`R`+`A`+`F`+`E`+`C`+`X`+`D`+`U` from `itch stats`, to the message.
+- **Both independent implementations agree.** `test/cross_check_lifetime.py` decodes the
+  same file from the spec tables, with its own byte offsets, and matches all fifteen
+  aggregate fields over the full session.
+
 ## Building
 
 ```bash
@@ -280,14 +406,21 @@ dune runtest
 # Nasdaq publishes full trading days, free, at https://emi.nasdaq.com/ITCH/Nasdaq ITCH/
 dune exec bin/itch.exe -- stats data/prefix.itch50
 dune exec bin/itch.exe -- dump data/prefix.itch50 -n 5
+dune exec bin/itch.exe -- book data/prefix.itch50 -symbol AAPL
+dune exec bin/itch.exe -- analyze data/prefix.itch50
 ```
 
 ## Roadmap
 
-1. The remaining message types (`P` `Q` `B` `H` `Y` `L` `N`).
-3. Zero allocation on the hot path, with benchmarks.
-4. An [OxCaml](https://oxcaml.org/) branch using unboxed layouts and stack allocation,
-   where `[@zero_alloc]` lets the compiler *prove* the parse path never allocates.
+1. The remaining message types (`P` `Q` `B` `H` `Y` `L` `N`). The full-day analysis turned
+   out not to need any of them: order lifetime uses only the nine already decoded, and the
+   message rate counts every type through the `Unparsed` path.
+2. A writeup of the vanilla-versus-OxCaml numbers with the session analysis as the payoff.
+
+Done: zero allocation on the hot path with benchmarks; the
+[OxCaml](https://oxcaml.org/) work, where `[@zero_alloc]` lets the compiler *prove* the
+parse path never allocates, now enforced in CI on every push; and the full-session order
+lifetime and message-rate analysis above.
 
 ## License
 
