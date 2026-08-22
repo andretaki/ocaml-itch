@@ -93,12 +93,27 @@ The parser is checked against ground truth, not against itself:
   the spec — because a generator that emits an illegal value fails the round trip without
   either side being wrong. The test is checked for teeth: injecting a one-byte offset
   error into the encoder makes it fail with a counterexample.
-- **The whole book, cross-checked.** An independent order book implementation replays the
-  same file and dumps best bid and ask for every symbol. All 700 books agree exactly, on
-  both sides, in price and size.
-- **Invariants over real data.** Shares resting at price levels and shares recorded
-  against live orders are maintained by different code paths; the replay checks that the
-  two agree, per symbol, at the end of the file.
+- **The whole book, cross-checked, in CI.** `test/cross_check_book.py` replays the same
+  bytes with its own order book, written from the spec, and asserts on best bid and ask
+  for every symbol. All 700 books on real data agree exactly, on both sides, in price and
+  size. This is the only stateful check here, and it is the one the per-message checks
+  cannot stand in for: a modify carries an order reference and nothing else, so both
+  implementations have to remember every live order, carry side and symbol forward across
+  a replace, and tell "subtract these shares" from "this is the new total". Each of those
+  produces a book that balances and is wrong.
+
+  CI runs it on a generated order flow, because the corpus used for the aggregate is not
+  one. That corpus comes from the round-trip generators, whose order references are
+  random: 12,124 of its 14,921 book messages are modifies for orders that never existed.
+  `gen_corpus -book` keeps the model the book keeps instead — every modify names a live
+  order, and no execution takes more shares than the order has left — so the replay is a
+  test rather than a coincidence. CI then drops the carry-forward of side from replace and
+  requires the comparison to notice.
+- **Invariants over real data, and the exit status now says so.** Shares resting at price
+  levels and shares recorded against live orders are maintained by different code paths;
+  the replay checks that the two agree, per symbol, at the end of the file. It used to
+  print `invariants FAILED` and exit 0, which meant nothing could gate on it. It exits
+  non-zero now, and CI gates on it.
 - **Decoded prices checked against the real world.** The sharpest check turns out to be the
   cheapest: replay the session and compare a few reconstructed books against what those
   stocks actually traded at. On 2020-01-30 this parser reconstructs AAPL at 321.01/321.79,

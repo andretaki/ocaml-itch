@@ -180,11 +180,25 @@ let book_command =
            "orphans         %d (modify for an order not seen)\n"
            (Order_book.orphans books);
          printf "live orders     %d\n" (Order_book.orders_live books);
-         (match Order_book.check_invariants books with
-          | Ok () -> printf "invariants      ok\n"
-          | Error error -> printf !"invariants      FAILED: %{Error#hum}\n" error);
+         (* The exit status matters and used to not. This printed "invariants
+            FAILED" and returned 0, so no script could gate on it -- the check
+            was a thing a human had to read. *)
+         let invariants_ok =
+           match Order_book.check_invariants books with
+           | Ok () ->
+             printf "invariants      ok\n";
+             true
+           | Error error ->
+             printf !"invariants      FAILED: %{Error#hum}\n" error;
+             false
+         in
          if tops
-         then
+         then (
+           (* A sentinel rather than a fixed header line count: the invariants
+              error above is a sexp and wraps onto as many lines as it needs, so
+              "tail -n +6" silently swept three lines of it into the CSV the
+              first time this was diffed against another implementation. *)
+           printf "-- tops --\n";
            List.iter (Order_book.locates books) ~f:(fun locate ->
              match Order_book.book_for books locate with
              | None -> ()
@@ -198,8 +212,8 @@ let book_command =
                  "%d,%s,%s\n"
                  (Types.Locate.to_int locate)
                  (field (Order_book.Book.best_bid book))
-                 (field (Order_book.Book.best_ask book)));
-         match symbol with
+                 (field (Order_book.Book.best_ask book))));
+         (match symbol with
          | None -> ()
          | Some symbol ->
            (match Hashtbl.find locate_of_symbol symbol with
@@ -218,7 +232,8 @@ let book_command =
                        printf "    %12s  %8d\n" (Types.Price.to_string price) shares)
                  in
                  show Sell "asks (low to high)";
-                 show Buy "bids (high to low)"))))
+                 show Buy "bids (high to low)")));
+         if not invariants_ok then Stdlib.exit 1))
 ;;
 
 module Checksum_reader = Reader.Make (Checksum)

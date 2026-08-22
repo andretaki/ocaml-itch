@@ -69,10 +69,17 @@ jobs:
   # round trip, the differential test, the order book and the allocation test
   # all green, and both of the implementations here catch it.
   #
+  # The book is checked the same way and separately, because it is the only
+  # stateful part: a modify carries an order reference and nothing else, so both
+  # implementations have to remember every live order, carry side and symbol
+  # forward across a replace, and tell "subtract these shares" from "this is the
+  # new total". Those produce plausible, wrong books, and no per-message check
+  # can see them.
+  #
   # This does not time anything: a shared runner cannot produce a benchmark
   # worth reporting. It checks agreement, which is what makes the timings taken
   # on a quiet machine mean something.
-  aggregate-agreement:
+  cross-implementation:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -141,6 +148,36 @@ jobs:
             echo "FAIL: the Python cross-check accepted a truncated Add Order"; fail=1
           fi
           exit $fail
+
+      # The aggregate corpus is drawn from the round-trip generators, whose
+      # order references are random -- so almost every modify is an orphan and
+      # the book it produces is not a plausible order flow. -book keeps the same
+      # model the book keeps, so every modify names a live order and no execution
+      # takes more shares than the order has left. `itch book` exits non-zero if
+      # its own invariants fail, so this gates those too.
+      - name: Replay a coherent order flow and compare the books
+        run: |
+          set -euo pipefail
+          opam exec -- ./_build/default/test/gen_corpus.exe -book /tmp/flow.itch50 20000
+          opam exec -- ./_build/default/bin/itch.exe book /tmp/flow.itch50 -tops > /tmp/book_ml.txt
+          sed -n '1,5p' /tmp/book_ml.txt
+          python3 test/cross_check_book.py /tmp/flow.itch50 --expect /tmp/book_ml.txt
+
+      # Spec 4.4.5: a replace does not repeat the side, so it has to be carried
+      # forward from the order being replaced. Dropping that is the canonical way
+      # to get a wrong book that still balances, so it is what this perturbs.
+      - name: Prove the book cross-check can fail
+        run: |
+          set -euo pipefail
+          cp test/cross_check_book.py /tmp/cross_check_book.orig
+          sed -i 's|orders\[new_ref\] = (locate_, side_, price, shares)|orders[new_ref] = (locate_, "B", price, shares)|' test/cross_check_book.py
+          if python3 test/cross_check_book.py /tmp/flow.itch50 --expect /tmp/book_ml.txt; then
+            cp /tmp/cross_check_book.orig test/cross_check_book.py
+            echo "FAIL: the book cross-check agreed with a replace that drops the side"
+            exit 1
+          fi
+          cp /tmp/cross_check_book.orig test/cross_check_book.py
+          echo "OK: the book cross-check reported the injected divergence"
 
   # The [@@zero_alloc] contract on Handler.S is the strongest claim this project
   # makes, and it is only checked by OxCaml, and only under --profile release
