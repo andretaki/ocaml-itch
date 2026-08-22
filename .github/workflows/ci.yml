@@ -179,6 +179,44 @@ jobs:
           cp /tmp/cross_check_book.orig test/cross_check_book.py
           echo "OK: the book cross-check reported the injected divergence"
 
+      # Level 4's lifetime analysis is a third consumer of the same stream, and
+      # it can be wrong in ways the book cannot detect: the book does not record
+      # when an order arrived, so every price level can be right while every
+      # lifetime is wrong. It runs on the coherent flow rather than the
+      # aggregate corpus because an orphaned modify never contributes a lifetime
+      # at all, and a corpus of orphans would check nothing.
+      - name: Compare the order-lifetime analysis against an independent implementation
+        run: |
+          set -euo pipefail
+          opam exec -- ./_build/default/bin/itch.exe analyze /tmp/flow.itch50 -capacity-log2 18 -aggregate | head -1 > /tmp/life_ml.txt
+          cat /tmp/life_ml.txt
+          python3 test/cross_check_lifetime.py /tmp/flow.itch50 --expect /tmp/life_ml.txt
+
+      # A partial cancel is not a death -- the order rests on with fewer shares
+      # -- so reading the share count as a new total rather than a delta to
+      # subtract silently moves orders between terminal causes and shifts every
+      # lifetime, without raising anywhere. That is the same class of mistake the
+      # order book already made once, and it is what this perturbs.
+      - name: Prove the lifetime cross-check can fail
+        run: |
+          set -euo pipefail
+          cp test/cross_check_lifetime.py /tmp/cross_check_lifetime.orig
+          sed -i 's|        remaining = entry\[1\] - shares|        remaining = shares|' test/cross_check_lifetime.py
+          if ! git diff --quiet test/cross_check_lifetime.py; then
+            echo "perturbation applied"
+          else
+            cp /tmp/cross_check_lifetime.orig test/cross_check_lifetime.py
+            echo "FAIL: the perturbation matched nothing -- cross_check_lifetime.py has moved"
+            exit 1
+          fi
+          if python3 test/cross_check_lifetime.py /tmp/flow.itch50 --expect /tmp/life_ml.txt; then
+            cp /tmp/cross_check_lifetime.orig test/cross_check_lifetime.py
+            echo "FAIL: the lifetime cross-check agreed with a wrong share arithmetic"
+            exit 1
+          fi
+          cp /tmp/cross_check_lifetime.orig test/cross_check_lifetime.py
+          echo "OK: the lifetime cross-check reported the injected divergence"
+
       # The round trip has the widest reach of any check here -- 20,000 generated
       # messages a run, at field values no hand-written vector would think of --
       # and "it is checked for teeth" was a thing someone did once and wrote
@@ -259,9 +297,26 @@ jobs:
           # the corrected-file path with Filename.basename, so any expect test in
           # a subdirectory crashes the runner even when every test passes.
           opam exec --switch=ox -- dune build --profile release @check || true
+          # Build the runner as an explicit target rather than relying on it
+          # being a side effect of the `dune runtest` above, which crashes. A
+          # runner that is stale or missing does not fail the loop below -- it
+          # reports "0 tests ran" and exits 0, which is a green tick for having
+          # run nothing. That happened locally: `dune build @all` left an hours
+          # old runner in place and three new test files reported 0 tests each.
+          opam exec --switch=ox -- dune build --profile release \
+            test/.itch_tests.inline-tests/inline-test-runner.exe
           opam exec --switch=ox -- dune runtest --profile release > /dev/null 2>&1 || true
           cd _build/default/test
-          for p in test_parser test_order_book test_differential test_roundtrip test_zero_alloc; do
-            ./.itch_tests.inline-tests/inline-test-runner.exe inline-test-runner itch_tests \
-              -partition "$p.ml" -source-tree-root . -diff-cmd - -show-counts
+          for p in test_parser test_order_book test_differential test_roundtrip test_zero_alloc \
+                   test_order_table test_histogram test_analysis; do
+            out=$(./.itch_tests.inline-tests/inline-test-runner.exe inline-test-runner itch_tests \
+              -partition "$p.ml" -source-tree-root . -diff-cmd - -show-counts 2>&1)
+            echo "$p: $out"
+            # A partition that ran nothing is not a pass.
+            case "$out" in
+              "0 tests ran"*)
+                echo "FAIL: $p registered no tests -- the runner is stale or the partition was renamed"
+                exit 1
+                ;;
+            esac
           done
