@@ -123,8 +123,9 @@ let%expect_test "a framed length that disagrees with the spec is rejected" =
   [%expect
     {|
     (Error
-     ("ITCH message length disagrees with the spec" (message_type X)
-      (spec_length 23) (framed_length 5)))
+     (("while parsing an ITCH message" (message_type (X)) (pos 0) (len 5))
+      ("ITCH message length disagrees with the spec" (message_type X)
+       (spec_length 23) (framed_length 5))))
     |}]
 ;;
 
@@ -197,13 +198,51 @@ let%expect_test "a range outside the buffer is rejected, not read" =
       ((stock_locate 0) (tracking_number 0) (timestamp 10953404452051)
        (event_code Start_of_messages))))
     (Error
-     ("ITCH message range is outside the buffer" (pos 8) (len 12)
-      (buffer_length 12)))
+     (("while parsing an ITCH message" (message_type ("\200")) (pos 8) (len 12))
+      ("ITCH message range is outside the buffer" (pos 8) (len 12)
+       (buffer_length 12))))
     (Error
-     ("ITCH message range is outside the buffer" (pos -1) (len 12)
-      (buffer_length 12)))
+     (("while parsing an ITCH message" (message_type ()) (pos -1) (len 12))
+      ("ITCH message range is outside the buffer" (pos -1) (len 12)
+       (buffer_length 12))))
     (Error
-     ("ITCH message range is outside the buffer" (pos 0) (len 0)
-      (buffer_length 12)))
+     (("while parsing an ITCH message" (message_type (S)) (pos 0) (len 0))
+      ("ITCH message range is outside the buffer" (pos 0) (len 0)
+       (buffer_length 12))))
+    |}]
+;;
+
+(* Order reference and match numbers are [uint64] on the wire and OCaml's native
+   [int] holds 63 bits, so the top of the range does not fit. Silently truncating
+   an order id would corrupt a book in a way that is close to untraceable -- a
+   modify would land on the wrong order, or on none -- so the parser is supposed
+   to raise instead. Nothing tested that it does. Nasdaq assigns these
+   sequentially from a small base, so the case never arises in real data, which
+   is exactly why it needs a written-down test rather than a claim in an mli. *)
+let%expect_test "an order reference too large for a native int is rejected, not truncated" =
+  let add_order_with_ref hex_ref =
+    (* 'A' Add Order, spec width 36: type, locate, tracking, timestamp,
+       order_ref, side, shares, stock, price. *)
+    bigstring_of_hex
+      ("41 0001 0000 000000000000 " ^ hex_ref ^ " 42 00000064 4141504C20202020 0012D687")
+  in
+  let show label hex_ref =
+    let buf = add_order_with_ref hex_ref in
+    let result = Or_error.try_with (fun () -> Parser.parse_exn buf ~pos:0 ~len:36) in
+    printf "%s -> " label;
+    match result with
+    | Ok (Add_order m) -> print_s [%sexp (m.order_ref : Types.Order_ref.t)]
+    | Ok other -> print_s [%sexp (other : Message.t)]
+    | Error error -> print_s [%sexp (error : Error.t)]
+  in
+  show "2^62 - 1 (the largest that fits)" "3FFFFFFFFFFFFFFF";
+  show "2^62 (one past)                 " "4000000000000000";
+  show "2^63 (bit 63 set)               " "8000000000000000";
+  show "2^64 - 1 (all ones)             " "FFFFFFFFFFFFFFFF";
+  [%expect {|
+    2^62 - 1 (the largest that fits) -> 4611686018427387903
+    2^62 (one past)                  -> (Failure "unsafe_read_uint64: value cannot be represented unboxed!")
+    2^63 (bit 63 set)                -> (Failure "unsafe_read_uint64: value cannot be represented unboxed!")
+    2^64 - 1 (all ones)              -> (Failure "unsafe_read_uint64: value cannot be represented unboxed!")
     |}]
 ;;

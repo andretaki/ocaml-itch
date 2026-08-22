@@ -180,4 +180,32 @@ let parse_exn buf ~pos ~len : Message.t =
   | message_type -> Unparsed { message_type; length = len }
 ;;
 
-let parse buf ~pos ~len = Or_error.try_with (fun () -> parse_exn buf ~pos ~len)
+(** The checked entry point.
+
+    The tag is not decoration. The sharpest failure reachable here comes from
+    [Bigstring.get_uint64_be_exn] and reads, in full, [unsafe_read_uint64: value
+    cannot be represented unboxed!] -- which does not say which message, which
+    field, or where in the file. Anything holding a [Message.t Or_error.t] is
+    already off the zero-allocation path, so there is nothing to save by leaving
+    it bare. *)
+let parse buf ~pos ~len =
+  match Or_error.try_with (fun () -> parse_exn buf ~pos ~len) with
+  | Ok message -> Ok message
+  | Error error ->
+    (* [Wire.message_type] does not bounds check, so only read it when the range
+       check above would have let it through. *)
+    let message_type =
+      if pos >= 0 && pos < Bigstring.length buf
+      then Some (Wire.message_type buf ~pos)
+      else None
+    in
+    Error
+      (Error.tag_s
+         error
+         ~tag:
+           [%message
+             "while parsing an ITCH message"
+               (message_type : char option)
+               (pos : int)
+               (len : int)])
+;;

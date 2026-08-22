@@ -57,11 +57,22 @@ end
 module Order_ref : sig
   type t [@@deriving compare, equal, hash, sexp_of]
 
-  (** Raises if the wire value has bit 63 set, i.e. does not fit in OCaml's
-      63-bit native [int]. Nasdaq assigns these sequentially from a small base,
-      so in practice they stay far below that -- but the field is nominally
-      [uint64], and silently truncating an order id would corrupt the book in a
-      way that is very hard to trace back. Fail loudly instead. *)
+  (** Values too large for OCaml's 63-bit native [int] are rejected rather than
+      truncated: a truncated order id lands a modify on the wrong order, or on
+      none, and the resulting book is wrong in a way that is close to
+      untraceable.
+
+      The cut-off is 2{^62}, not bit 63 as this used to say, and the rejection
+      happens one layer down. Reading the field goes through
+      [Bigstring.get_uint64_be_exn], which raises for anything above [max_int]
+      -- so a wire value of 2{^62} with bit 63 clear is already refused, and
+      this function's own guard is never reached from the wire. It stays as a
+      guard for values built by hand. Pinned by test/test_parser.ml, which walks
+      2{^62}-1, 2{^62}, 2{^63} and 2{^64}-1.
+
+      Nasdaq assigns these sequentially from a small base, so the case does not
+      arise in real data -- which is why it needs a written-down test rather
+      than a sentence in an mli. *)
   val of_uint64_exn : int -> t
 
   val to_int : t -> int
