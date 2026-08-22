@@ -309,6 +309,237 @@ let checksum_command =
               && consumed = slow_consumed))))
 ;;
 
+
+module Analysis_reader = Reader.Make (Analysis)
+
+(* Nanoseconds are unreadable at every scale that matters here, and rounding
+   them to one unit is worse: the interesting lifetimes span microseconds to
+   hours in the same table. Render each value in the largest unit that leaves a
+   digit before the point. *)
+let format_ns ns =
+  let f = Float.of_int ns in
+  if ns < 1_000
+  then sprintf "%d ns" ns
+  else if ns < 1_000_000
+  then sprintf "%.2f us" (f /. 1e3)
+  else if ns < 1_000_000_000
+  then sprintf "%.2f ms" (f /. 1e6)
+  else if ns < 60_000_000_000
+  then sprintf "%.2f s" (f /. 1e9)
+  else sprintf "%.1f min" (f /. 60e9)
+;;
+
+let format_ns_range low high =
+  if low = high then format_ns low else sprintf "%s - %s" (format_ns low) (format_ns high)
+;;
+
+let percentiles = [ 1.; 10.; 25.; 50.; 75.; 90.; 99.; 99.9 ]
+
+let print_lifetime_table label histogram =
+  let count = Histogram.count histogram in
+  if count = 0
+  then printf "\n%s: none\n" label
+  else (
+    printf "\n%s (%d orders)\n" label count;
+    printf "  %-8s %s\n" "mean" (format_ns (Float.iround_nearest_exn (Histogram.mean histogram)));
+    printf "  %-8s %s\n" "min" (format_ns (Histogram.min_value histogram));
+    List.iter percentiles ~f:(fun p ->
+      let index = Histogram.bucket_at_percentile histogram p in
+      printf
+        "  p%-7g %s\n"
+        p
+        (format_ns_range
+           (Histogram.bucket_low histogram index)
+           (Histogram.bucket_high histogram index)));
+    printf "  %-8s %s\n" "max" (format_ns (Histogram.max_value histogram)))
+;;
+
+(* The headline number, and the one most often quoted without evidence. Bucket
+   boundaries are powers of two internally, so a threshold like "one
+   millisecond" is asked for as "at or below 999,999 ns" -- one below the
+   boundary -- and the count is then exact rather than rounded up into the
+   bucket that straddles it. *)
+let print_survival histogram =
+  let count = Histogram.count histogram in
+  if count > 0
+  then (
+    printf "\nshare of orders that lived less than\n";
+    List.iter
+      [ "1 us", 1_000; "10 us", 10_000; "100 us", 100_000; "1 ms", 1_000_000
+      ; "10 ms", 10_000_000; "100 ms", 100_000_000; "1 s", 1_000_000_000
+      ; "10 s", 10_000_000_000; "1 min", 60_000_000_000 ]
+      ~f:(fun (label, threshold) ->
+        let below = Histogram.count_at_or_below histogram (threshold - 1) in
+        printf
+          "  %-6s %12d  %5.2f%%\n"
+          label
+          below
+          (Float.of_int below /. Float.of_int count *. 100.)))
+;;
+
+let analyze_command =
+  Command.basic
+    ~summary:"Order lifetime distribution and per-millisecond message rates"
+    (let%map_open.Command path = anon ("FILE" %: Filename_unix.arg_type)
+     and capacity_log2 =
+       flag
+         "-capacity-log2"
+         (optional int)
+         ~doc:"N live-order table is 2**N slots (default 25, about 34M)"
+     and ms_csv =
+       flag
+         "-ms-csv"
+         (optional string)
+         ~doc:"PATH write ms,count for every millisecond of the session"
+     and aggregate =
+       flag
+         "-aggregate"
+         no_arg
+         ~doc:
+           " print one line of exact integers, for comparison against an \
+            independent implementation"
+     in
+     fun () ->
+       with_mapped_file path ~f:(fun buf ->
+         let state = Analysis.create ?capacity_log2 () in
+         let len = Bigstring.length buf in
+         let start = now_seconds () in
+         let consumed = Analysis_reader.consume state buf ~pos:0 ~len in
+         let elapsed = now_seconds () -. start in
+         if aggregate
+         then (
+           (* Every field here is an exact integer, deliberately: percentiles
+              are bucketed and two implementations could disagree on one
+              without either being wrong, so the cross-check compares only
+              quantities that have a single right answer. The sum, min and max
+              of the lifetimes pin the distribution's first moment and both
+              ends without inheriting the histogram's resolution. *)
+           let peak_ms = ref (-1) in
+           let peak_count = ref (-1) in
+           Analysis.iter_milliseconds state ~f:(fun ~ms ~count ->
+             if count > !peak_count
+             then (
+               peak_count := count;
+               peak_ms := ms));
+           let all = Analysis.all_lifetimes state in
+           printf
+             "messages=%d decoded=%d timestamped=%d orphans=%d resting=%d executed=%d \
+              cancelled=%d deleted=%d replaced=%d lifetime_sum_hi=%d lifetime_sum_lo=%d \
+              lifetime_min=%d \
+              lifetime_max=%d peak_ms=%d peak_ms_count=%d\n"
+             (Analysis.messages state)
+             (Analysis.decoded_messages state)
+             (Analysis.timestamped_messages state)
+             (Analysis.orphan_modifies state)
+             (Analysis.live_orders state)
+             (Analysis.terminated state Executed)
+             (Analysis.terminated state Cancelled)
+             (Analysis.terminated state Deleted)
+             (Analysis.terminated state Replaced)
+             (Histogram.total_high all)
+             (Histogram.total_low all)
+             (Histogram.min_value all)
+             (Histogram.max_value all)
+             !peak_ms
+             !peak_count);
+         (* The aggregate is one line and the report is a page; printing the
+            aggregate first means a single pass over 12.95 GB yields both, and
+            [head -1] still picks the machine-readable line out for the
+            cross-check. A second pass costs fourteen minutes. *)
+         (
+         printf "\nfile            %s\n" path;
+         printf "size            %d bytes\n" len;
+         printf "consumed        %d bytes (%d unconsumed tail)\n" consumed (len - consumed);
+         printf "messages        %d\n" (Analysis.messages state);
+         printf "decoded         %d\n" (Analysis.decoded_messages state);
+         printf
+           "elapsed         %.3f s  (%.2f M msg/s, %.1f MB/s)\n"
+           elapsed
+           (Float.of_int (Analysis.messages state) /. elapsed /. 1e6)
+           (Float.of_int consumed /. elapsed /. 1e6);
+         let first = Analysis.first_timestamp state in
+         let last = Analysis.last_timestamp state in
+         if first >= 0
+         then (
+           printf
+             "session         %s to %s\n"
+             (Types.Timestamp.to_string_hum (Types.Timestamp.of_ns_since_midnight first))
+             (Types.Timestamp.to_string_hum (Types.Timestamp.of_ns_since_midnight last)));
+         printf
+           "live table      %d of %d slots used at peak (%.1f%%)\n"
+           (Analysis.max_live_orders state)
+           (Analysis.table_capacity state)
+           (Float.of_int (Analysis.max_live_orders state)
+            /. Float.of_int (Analysis.table_capacity state)
+            *. 100.);
+         printf "orphan modifies %d (modify for an order never seen)\n" (Analysis.orphan_modifies state);
+         printf "still resting   %d at end of file\n" (Analysis.live_orders state);
+         let all = Analysis.all_lifetimes state in
+         printf "\n%-10s %14s  %s\n" "cause" "orders" "share of terminations";
+         let terminated_total = Histogram.count all in
+         List.iter Analysis.Cause.all ~f:(fun cause ->
+           let n = Analysis.terminated state cause in
+           printf
+             "%-10s %14d  %5.2f%%\n"
+             (Analysis.Cause.to_string cause)
+             n
+             (if terminated_total = 0
+              then 0.
+              else Float.of_int n /. Float.of_int terminated_total *. 100.));
+         print_lifetime_table "lifetime, all terminated orders" all;
+         List.iter Analysis.Cause.all ~f:(fun cause ->
+           print_lifetime_table
+             (sprintf "lifetime, %s" (Analysis.Cause.to_string cause))
+             (Analysis.lifetimes state cause));
+         print_survival all;
+         (* Message rate. Every millisecond of the session is counted, including
+            the empty ones: leaving them out would divide by the busy
+            milliseconds only and quietly inflate the average, which is the
+            denominator the burst ratio is measured against. *)
+         let rates = Histogram.create ~significant_bits:5 in
+         let busiest_ms = ref (-1) in
+         let busiest_count = ref (-1) in
+         let empty_ms = ref 0 in
+         Analysis.iter_milliseconds state ~f:(fun ~ms ~count ->
+           Histogram.record rates count;
+           if count = 0 then incr empty_ms;
+           if count > !busiest_count
+           then (
+             busiest_count := count;
+             busiest_ms := ms));
+         let span = Histogram.count rates in
+         if span > 0
+         then (
+           let mean = Histogram.mean rates in
+           printf "\nmessage rate, per millisecond of the session\n";
+           printf "  milliseconds in session   %d\n" span;
+           printf "  empty milliseconds        %d (%.2f%%)\n" !empty_ms
+             (Float.of_int !empty_ms /. Float.of_int span *. 100.);
+           printf "  timestamped messages      %d\n" (Analysis.timestamped_messages state);
+           printf "  mean                      %.1f msg/ms\n" mean;
+           List.iter [ 50.; 90.; 99.; 99.9; 99.99 ] ~f:(fun p ->
+             let index = Histogram.bucket_at_percentile rates p in
+             printf
+               "  p%-6g                   %d - %d msg/ms\n"
+               p
+               (Histogram.bucket_low rates index)
+               (Histogram.bucket_high rates index));
+           printf "  peak                      %d msg/ms\n" !busiest_count;
+           printf
+             "  peak at                   %s\n"
+             (Types.Timestamp.to_string_hum
+                (Types.Timestamp.of_ns_since_midnight (!busiest_ms * 1_000_000)));
+           printf "  peak / mean               %.1fx\n" (Float.of_int !busiest_count /. mean));
+         match ms_csv with
+         | None -> ()
+         | Some csv_path ->
+           Out_channel.with_file csv_path ~f:(fun out ->
+             Out_channel.output_string out "ms,count\n";
+             Analysis.iter_milliseconds state ~f:(fun ~ms ~count ->
+               Out_channel.output_string out (sprintf "%d,%d\n" ms count)));
+           printf "\nwrote %s\n" csv_path)))
+;;
+
 let () =
   Command_unix.run
     (Command.group
@@ -317,5 +548,6 @@ let () =
        ; "dump", dump_command
        ; "book", book_command
        ; "checksum", checksum_command
+       ; "analyze", analyze_command
        ])
 ;;
