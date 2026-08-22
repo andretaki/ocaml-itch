@@ -58,12 +58,23 @@ let check_length ~expected ~actual ~message_type =
     nothing -- see [test/test_zero_alloc.ml], which asserts exactly that over a
     real file and fails the build if it ever stops being true. *)
 module Make (H : Handler.S) = struct
-  (* The header fields are read inside each branch, after the length check,
-     rather than once up front. Reading them eagerly looked tidier and was
-     wrong: a message shorter than the 11-byte header -- which the framing
-     permits even though no real ITCH message is that short -- would have had
-     its timestamp read from bytes past the end of the message, and past the end
-     of the mapping entirely if it were the last one in the file.
+  (* [check_length] comes first in every branch, and the header fields are read
+     after it. Both halves of that matter, and the second was got wrong once
+     already.
+
+     Reading the header once up front, before the message type is known, is
+     wrong because the framing permits a message shorter than the 11-byte header
+     even though no real ITCH message is that short: its timestamp would be read
+     from bytes past the end of the message, and past the end of the mapping
+     entirely if it were the last one in the file.
+
+     Moving those reads inside the branches is not sufficient on its own, which
+     is what this comment used to claim. A message whose type byte says 'A' but
+     whose framed length is 3 still reaches the 'A' branch, and if the header is
+     read before [check_length] runs then the unchecked read happens anyway --
+     the exception is raised a moment too late to prevent it. Ordering the check
+     first closes that window; it costs nothing, because the check was already
+     on the path.
 
      Doing it this way also buys the safety argument that lets the field
      accessors skip bounds checks: [consume] has already established that
@@ -78,8 +89,6 @@ module Make (H : Handler.S) = struct
     match Wire.message_type buf ~pos with
     | 'A' | 'F' ->
       let attributed = Char.equal (Wire.message_type buf ~pos) 'F' in
-      let stock_locate = Wire.stock_locate buf ~pos in
-      let timestamp = Wire.timestamp buf ~pos in
       check_length
         ~expected:
           (if attributed
@@ -87,6 +96,8 @@ module Make (H : Handler.S) = struct
            else Wire.Add_order.length_without_mpid)
         ~actual:len
         ~message_type:'A';
+      let stock_locate = Wire.stock_locate buf ~pos in
+      let timestamp = Wire.timestamp buf ~pos in
       H.on_add_order
         state
         buf
@@ -99,9 +110,9 @@ module Make (H : Handler.S) = struct
         ~price:(Wire.Add_order.price buf ~pos)
         ~attributed
     | 'E' ->
+      check_length ~expected:Wire.Order_executed.length ~actual:len ~message_type:'E';
       let stock_locate = Wire.stock_locate buf ~pos in
       let timestamp = Wire.timestamp buf ~pos in
-      check_length ~expected:Wire.Order_executed.length ~actual:len ~message_type:'E';
       H.on_order_executed
         state
         ~stock_locate
@@ -110,12 +121,12 @@ module Make (H : Handler.S) = struct
         ~executed_shares:(Wire.Order_executed.executed_shares buf ~pos)
         ~match_number:(Wire.Order_executed.match_number buf ~pos)
     | 'C' ->
-      let stock_locate = Wire.stock_locate buf ~pos in
-      let timestamp = Wire.timestamp buf ~pos in
       check_length
         ~expected:Wire.Order_executed_with_price.length
         ~actual:len
         ~message_type:'C';
+      let stock_locate = Wire.stock_locate buf ~pos in
+      let timestamp = Wire.timestamp buf ~pos in
       H.on_order_executed_with_price
         state
         ~stock_locate
@@ -126,9 +137,9 @@ module Make (H : Handler.S) = struct
         ~printable:(Char.equal (Wire.Order_executed_with_price.printable buf ~pos) 'Y')
         ~execution_price:(Wire.Order_executed_with_price.execution_price buf ~pos)
     | 'X' ->
+      check_length ~expected:Wire.Order_cancel.length ~actual:len ~message_type:'X';
       let stock_locate = Wire.stock_locate buf ~pos in
       let timestamp = Wire.timestamp buf ~pos in
-      check_length ~expected:Wire.Order_cancel.length ~actual:len ~message_type:'X';
       H.on_order_cancel
         state
         ~stock_locate
@@ -136,18 +147,18 @@ module Make (H : Handler.S) = struct
         ~order_ref:(Wire.Order_cancel.order_ref buf ~pos)
         ~cancelled_shares:(Wire.Order_cancel.cancelled_shares buf ~pos)
     | 'D' ->
+      check_length ~expected:Wire.Order_delete.length ~actual:len ~message_type:'D';
       let stock_locate = Wire.stock_locate buf ~pos in
       let timestamp = Wire.timestamp buf ~pos in
-      check_length ~expected:Wire.Order_delete.length ~actual:len ~message_type:'D';
       H.on_order_delete
         state
         ~stock_locate
         ~timestamp
         ~order_ref:(Wire.Order_delete.order_ref buf ~pos)
     | 'U' ->
+      check_length ~expected:Wire.Order_replace.length ~actual:len ~message_type:'U';
       let stock_locate = Wire.stock_locate buf ~pos in
       let timestamp = Wire.timestamp buf ~pos in
-      check_length ~expected:Wire.Order_replace.length ~actual:len ~message_type:'U';
       H.on_order_replace
         state
         ~stock_locate
@@ -157,9 +168,9 @@ module Make (H : Handler.S) = struct
         ~shares:(Wire.Order_replace.shares buf ~pos)
         ~price:(Wire.Order_replace.price buf ~pos)
     | 'S' ->
+      check_length ~expected:Wire.System_event.length ~actual:len ~message_type:'S';
       let stock_locate = Wire.stock_locate buf ~pos in
       let timestamp = Wire.timestamp buf ~pos in
-      check_length ~expected:Wire.System_event.length ~actual:len ~message_type:'S';
       H.on_system_event
         state
         ~stock_locate
@@ -167,9 +178,9 @@ module Make (H : Handler.S) = struct
         ~timestamp
         ~event_code:(Wire.System_event.event_code buf ~pos)
     | 'R' ->
+      check_length ~expected:Wire.Stock_directory.length ~actual:len ~message_type:'R';
       let stock_locate = Wire.stock_locate buf ~pos in
       let timestamp = Wire.timestamp buf ~pos in
-      check_length ~expected:Wire.Stock_directory.length ~actual:len ~message_type:'R';
       H.on_stock_directory state buf ~pos ~stock_locate ~timestamp
     | message_type -> H.on_other state buf ~pos ~message_type ~length:len
   ;;

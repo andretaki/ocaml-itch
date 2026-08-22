@@ -74,6 +74,31 @@ struct Checksum {
   }
 };
 
+// Mirrors Reader.check_length in lib/itch/reader.ml, which raises. Two reasons
+// this has to be here and not omitted as "the OCaml's problem":
+//
+// First, a baseline that skips a check the subject performs is not a baseline.
+// It is one comparison and one branch per message, and leaving it out makes the
+// C++ faster for a reason that has nothing to do with the language.
+//
+// Second, without it this program reads fields out of a message too short to
+// contain them. Measured before this was added: on a file ending in a message
+// whose type byte says 'A' but whose framed length is 12, the OCaml raised and
+// this program printed a confident aggregate built from 24 bytes past the end
+// of the message. Two programs that disagree about whether input is valid are
+// not computing the same thing, and "the aggregates match" stops being evidence.
+[[noreturn]] void length_mismatch(char type, uint32_t expected, uint32_t actual) {
+  std::fprintf(stderr,
+               "ITCH message length disagrees with the spec: type %c "
+               "spec_length=%u framed_length=%u\n",
+               type, expected, actual);
+  std::exit(1);
+}
+
+inline void check_length(char type, uint32_t expected, uint32_t actual) {
+  if (expected != actual) length_mismatch(type, expected, actual);
+}
+
 size_t consume(Checksum &c, const uint8_t *buf, size_t len) {
   size_t p = 0;
   while (p + 2 <= len) {
@@ -81,13 +106,20 @@ size_t consume(Checksum &c, const uint8_t *buf, size_t len) {
     if (message_length == 0 || p + 2 + message_length > len) break;
     const uint8_t *m = buf + p + 2;
     const char type = static_cast<char>(m[0]);
-    const int64_t stock_locate = be16(m + 1);
-    const int64_t timestamp = be48(m + 5);
+    // stock_locate and timestamp are NOT read here. The framing permits a
+    // message shorter than the 11-byte header, and reading the header before
+    // the type is known -- or before check_length has confirmed the width --
+    // reads past the end of the message, and past the end of the mapping if it
+    // is the last one in the file. Each branch below reads them after its
+    // check_length, exactly as Reader.Make.dispatch does.
 
     switch (type) {
       case 'A':
       case 'F': {
         const bool attributed = (type == 'F');
+        check_length(type, attributed ? 40 : 36, message_length);
+        const int64_t stock_locate = be16(m + 1);
+        const int64_t timestamp = be48(m + 5);
         c.note(stock_locate, timestamp);
         c.adds += 1;
         c.sum_shares += static_cast<int64_t>(be32(m + 20)) +
@@ -98,6 +130,9 @@ size_t consume(Checksum &c, const uint8_t *buf, size_t len) {
         break;
       }
       case 'E': {
+        check_length(type, 31, message_length);
+        const int64_t stock_locate = be16(m + 1);
+        const int64_t timestamp = be48(m + 5);
         c.note(stock_locate, timestamp);
         c.executes += 1;
         c.sum_shares += static_cast<int64_t>(be32(m + 19));
@@ -106,6 +141,9 @@ size_t consume(Checksum &c, const uint8_t *buf, size_t len) {
         break;
       }
       case 'C': {
+        check_length(type, 36, message_length);
+        const int64_t stock_locate = be16(m + 1);
+        const int64_t timestamp = be48(m + 5);
         c.note(stock_locate, timestamp);
         c.executes += 1;
         c.sum_shares +=
@@ -116,6 +154,9 @@ size_t consume(Checksum &c, const uint8_t *buf, size_t len) {
         break;
       }
       case 'X': {
+        check_length(type, 23, message_length);
+        const int64_t stock_locate = be16(m + 1);
+        const int64_t timestamp = be48(m + 5);
         c.note(stock_locate, timestamp);
         c.cancels += 1;
         c.sum_shares += static_cast<int64_t>(be32(m + 19));
@@ -123,12 +164,18 @@ size_t consume(Checksum &c, const uint8_t *buf, size_t len) {
         break;
       }
       case 'D': {
+        check_length(type, 19, message_length);
+        const int64_t stock_locate = be16(m + 1);
+        const int64_t timestamp = be48(m + 5);
         c.note(stock_locate, timestamp);
         c.deletes += 1;
         c.xor_order_refs ^= static_cast<int64_t>(be64(m + 11));
         break;
       }
       case 'U': {
+        check_length(type, 35, message_length);
+        const int64_t stock_locate = be16(m + 1);
+        const int64_t timestamp = be48(m + 5);
         c.note(stock_locate, timestamp);
         c.replaces += 1;
         c.sum_shares += static_cast<int64_t>(be32(m + 27));
@@ -138,6 +185,9 @@ size_t consume(Checksum &c, const uint8_t *buf, size_t len) {
         break;
       }
       case 'S': {
+        check_length(type, 12, message_length);
+        const int64_t stock_locate = be16(m + 1);
+        const int64_t timestamp = be48(m + 5);
         c.note(stock_locate, timestamp);
         c.system_events += 1;
         c.sum_shares += static_cast<int64_t>(be16(m + 3)) +
@@ -145,6 +195,9 @@ size_t consume(Checksum &c, const uint8_t *buf, size_t len) {
         break;
       }
       case 'R': {
+        check_length(type, 39, message_length);
+        const int64_t stock_locate = be16(m + 1);
+        const int64_t timestamp = be48(m + 5);
         c.note(stock_locate, timestamp);
         c.directories += 1;
         c.sum_shares += static_cast<int64_t>(be32(m + 21));
