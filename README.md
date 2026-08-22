@@ -149,6 +149,13 @@ The parser is checked against ground truth, not against itself:
   message count — and it earned its keep immediately by catching a 64-byte closure in
   `Reader.consume` that the runtime test was blind to.
 
+  CI enforces it, on every push to `main`, by building the OxCaml compiler from source and
+  compiling with `--profile release` — the annotations are inert without it, because dune's
+  dev profile passes `-opaque` and withholds the cross-module information the checker
+  needs. The job then annotates a function that genuinely allocates and requires the build
+  to fail, because an annotation that only ever passes proves nothing. It costs about
+  twenty-three minutes, which is why pull requests skip it and merges do not.
+
 ## Performance
 
 Two decode paths. `Parser.parse_exn` returns a `Message.t` you can pattern match on, and

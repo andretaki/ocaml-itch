@@ -179,17 +179,43 @@ jobs:
           cp /tmp/cross_check_book.orig test/cross_check_book.py
           echo "OK: the book cross-check reported the injected divergence"
 
+      # The round trip has the widest reach of any check here -- 20,000 generated
+      # messages a run, at field values no hand-written vector would think of --
+      # and "it is checked for teeth" was a thing someone did once and wrote
+      # down, never reproduced. Shift the encoder's share field by one byte and
+      # require a counterexample. Last in the job: it perturbs the tree and the
+      # build, and restores both.
+      - name: Prove the round trip can fail
+        run: |
+          set -euo pipefail
+          cp lib/itch/encoder.ml /tmp/encoder.orig
+          sed -i 's|Bigstring.set_uint32_be_exn buf ~pos:(pos + 20) (Shares.to_int m.shares);|Bigstring.set_uint32_be_exn buf ~pos:(pos + 21) (Shares.to_int m.shares);|' lib/itch/encoder.ml
+          if ! git diff --quiet lib/itch/encoder.ml; then
+            echo "perturbation applied"
+          else
+            echo "FAIL: the perturbation matched nothing -- encoder.ml has moved"
+            exit 1
+          fi
+          if opam exec -- dune runtest >/dev/null 2>&1; then
+            cp /tmp/encoder.orig lib/itch/encoder.ml
+            echo "FAIL: the round trip passed with a one-byte offset error in the encoder"
+            exit 1
+          fi
+          cp /tmp/encoder.orig lib/itch/encoder.ml
+          echo "OK: the round trip produced a counterexample"
+
   # The [@@zero_alloc] contract on Handler.S is the strongest claim this project
   # makes, and it is only checked by OxCaml, and only under --profile release
   # (dune's dev profile passes -opaque, which withholds the cross-module
   # information the checker needs). Without this job the claim is unenforced.
   #
-  # Building the OxCaml compiler from source is slow (tens of minutes) and this
-  # job has not yet had a green run, so it is on-demand only for now. Once it
-  # has passed from the Actions tab, change the condition to
-  # `github.event_name != 'pull_request'` so it gates main.
+  # Building the OxCaml compiler from source is slow: it ran green from the
+  # Actions tab on 2026-08-22 in 23m24s, on 2e4290f, and that is why it now
+  # gates main rather than waiting to be asked. It is skipped on pull requests
+  # only because twenty-odd minutes is too long to sit in front of a review; a
+  # merge to main runs it.
   oxcaml-zero-alloc:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
