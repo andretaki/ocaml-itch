@@ -57,11 +57,21 @@ jobs:
       - name: Test
         run: opam exec -- dune runtest
 
-  # The C++ baseline is only meaningful if it still agrees with the OCaml, and
-  # nothing else in CI compiles it. This does not time anything -- a shared
-  # runner cannot produce a benchmark worth reporting -- it checks agreement on
-  # a generated corpus, which is what makes the timings comparable when they are
-  # taken on a quiet machine.
+  # Three implementations, one aggregate.
+  #
+  # The C++ and the Python each transcribe the ITCH offsets by hand from the
+  # specification, so a wrong offset in lib/itch/wire.ml disagrees with two
+  # independent readings rather than with none. This is the only check in the
+  # project that can catch a *shared misreading* of the spec: the round-trip
+  # property test cannot, because the encoder and the decoder would misread it
+  # identically and the round trip would still close. Measured -- swapping the
+  # two order-reference offsets in wire.ml and encoder.ml together leaves the
+  # round trip, the differential test, the order book and the allocation test
+  # all green, and both of the implementations here catch it.
+  #
+  # This does not time anything: a shared runner cannot produce a benchmark
+  # worth reporting. It checks agreement, which is what makes the timings taken
+  # on a quiet machine mean something.
   aggregate-agreement:
     runs-on: ubuntu-latest
     steps:
@@ -82,15 +92,55 @@ jobs:
       - name: Build C++ baseline
         run: g++ -O3 -std=c++20 -o bench/cpp/baseline bench/cpp/baseline.cpp
 
-      - name: Generate a corpus and compare aggregates
+      - name: Generate a corpus and compare all three aggregates
         run: |
           set -euo pipefail
           opam exec -- ./_build/default/test/gen_corpus.exe /tmp/corpus.itch50 20000
-          opam exec -- ./_build/default/bin/itch.exe checksum /tmp/corpus.itch50 | head -1 > /tmp/ml.txt
-          ./bench/cpp/baseline /tmp/corpus.itch50 1 | head -1 > /tmp/cpp.txt
-          echo "OCaml: $(cat /tmp/ml.txt)"
-          echo "C++  : $(cat /tmp/cpp.txt)"
+          opam exec -- ./_build/default/bin/itch.exe checksum /tmp/corpus.itch50 | head -2 > /tmp/ml.txt
+          ./bench/cpp/baseline /tmp/corpus.itch50 1 | head -2 > /tmp/cpp.txt
+          echo "OCaml: $(head -1 /tmp/ml.txt)"
+          echo "C++  : $(head -1 /tmp/cpp.txt)"
           diff /tmp/ml.txt /tmp/cpp.txt
+          python3 test/cross_check.py checksum /tmp/corpus.itch50 --expect /tmp/ml.txt
+
+      # An agreement check that has never been seen to disagree is not evidence
+      # that it can. Perturb one offset and require the Python to notice, in the
+      # job that relies on it noticing.
+      - name: Prove the cross-check can fail
+        run: |
+          set -euo pipefail
+          cp test/cross_check.py /tmp/cross_check.orig
+          sed -i 's|a\.sum_prices += price|a.sum_prices += price + 1|' test/cross_check.py
+          if python3 test/cross_check.py checksum /tmp/corpus.itch50 --expect /tmp/ml.txt; then
+            cp /tmp/cross_check.orig test/cross_check.py
+            echo "FAIL: the cross-check agreed with a deliberately wrong implementation"
+            exit 1
+          fi
+          cp /tmp/cross_check.orig test/cross_check.py
+          echo "OK: the cross-check reported the injected divergence"
+
+      # A message whose type byte names a decoded type but whose framed length
+      # is too short to hold that type's fields. Reading its header anyway runs
+      # off the end of the message, and off the end of the mapping when it is
+      # the last message in a page-aligned file. Every implementation here has
+      # had that bug: the OCaml read the header before the type was known, then
+      # read it before check_length ran, and the C++ did both until it was given
+      # a check_length at all. All three must refuse the file.
+      - name: A message too short for its type must be refused by all three
+        run: |
+          set -euo pipefail
+          opam exec -- ./_build/default/test/gen_corpus.exe -malformed /tmp/malformed.itch50
+          fail=0
+          if opam exec -- ./_build/default/bin/itch.exe checksum /tmp/malformed.itch50 >/dev/null 2>&1; then
+            echo "FAIL: the OCaml accepted a truncated Add Order"; fail=1
+          fi
+          if ./bench/cpp/baseline /tmp/malformed.itch50 1 >/dev/null 2>&1; then
+            echo "FAIL: the C++ baseline accepted a truncated Add Order"; fail=1
+          fi
+          if python3 test/cross_check.py checksum /tmp/malformed.itch50 >/dev/null 2>&1; then
+            echo "FAIL: the Python cross-check accepted a truncated Add Order"; fail=1
+          fi
+          exit $fail
 
   # The [@@zero_alloc] contract on Handler.S is the strongest claim this project
   # makes, and it is only checked by OxCaml, and only under --profile release
